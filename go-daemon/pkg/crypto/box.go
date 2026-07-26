@@ -18,6 +18,8 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/crypto/nacl/secretbox"
+
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 )
 
 // ErrNoKeypair is returned when no keypair exists at the expected path.
@@ -387,4 +389,38 @@ func (m *Manager) KnownPeerIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// HandleKeyExchangeMessage processes an incoming key exchange message.
+// Stores the peer's Curve25519 public key so future messages can be encrypted.
+func (m *Manager) HandleKeyExchangeMessage(msg *message.Message) error {
+	var payload message.KeyExchangePayload
+	if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+		return fmt.Errorf("parse key exchange: %w", err)
+	}
+
+	pubBytes, err := hex.DecodeString(payload.PublicKeyHex)
+	if err != nil {
+		return fmt.Errorf("decode public key: %w", err)
+	}
+
+	var pubKey [32]byte
+	copy(pubKey[:], pubBytes[:32])
+
+	m.SetPeerKey(msg.Sender, pubKey)
+	return nil
+}
+
+// ShouldSendKeyExchange returns true if we should send a key exchange to this peer.
+func (m *Manager) ShouldSendKeyExchange(peerID string) bool {
+	_, has := m.GetPeerKey(peerID)
+	return !has
+}
+
+// MyPublicKeyHex returns this peer's Curve25519 public key as hex.
+func (m *Manager) MyPublicKeyHex() string {
+	if m.Keypair == nil {
+		return ""
+	}
+	return m.Keypair.PublicKeyHex()
 }

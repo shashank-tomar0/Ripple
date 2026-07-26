@@ -30,6 +30,7 @@ class _QRScreenState extends State<QRScreen> {
   // ── Show mode data ──
   String _localPeerId = '';
   String _nickname = '';
+  String _localPubKey = '';
 
   // ── Scan mode state ──
   MobileScannerController? _scannerController;
@@ -42,6 +43,7 @@ class _QRScreenState extends State<QRScreen> {
     final appState = context.read<AppState>();
     _localPeerId = appState.localPeerId;
     _nickname = appState.nickname;
+    _localPubKey = appState.localPubKey;
   }
 
   @override
@@ -83,11 +85,12 @@ class _QRScreenState extends State<QRScreen> {
     _pauseScanner();
 
     // Parse the ripple: URI.  Accept either:
-    //   ripple:<peerId>?nick=<name>
-    //   ripple://<peerId>?nick=<name>
+    //   ripple:<peerId>?nick=<name>&pk=<pubkey>
+    //   ripple://<peerId>?nick=<name>&pk=<pubkey>
     String peerId;
-    final nicknameFromQr =
-        Uri.tryParse(rawValue)?.queryParameters['nick'] ?? 'Unknown';
+    final uri = Uri.tryParse(rawValue);
+    final nicknameFromQr = uri?.queryParameters['nick'] ?? 'Unknown';
+    final pubKeyFromQr = uri?.queryParameters['pk'] ?? '';
 
     if (rawValue.startsWith('ripple:')) {
       // Manual parse: strip scheme and query.
@@ -102,12 +105,12 @@ class _QRScreenState extends State<QRScreen> {
       peerId = rawValue;
     }
 
-    _showConnectDialog(peerId.trim(), nicknameFromQr);
+    _showConnectDialog(peerId.trim(), nicknameFromQr, pubKeyFromQr);
   }
 
   // ── Dialogs ──
 
-  void _showConnectDialog(String peerId, String nickname) {
+  void _showConnectDialog(String peerId, String nickname, String peerPubKey) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final shortId = peerId.length > 16
@@ -154,6 +157,15 @@ class _QRScreenState extends State<QRScreen> {
                 ),
               ],
             ),
+            if (peerPubKey.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text(
+                'E2E Key Exchange: Will share your Curve25519 public key',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colorScheme.primary,
+                ),
+              ),
+            ],
           ],
         ),
         actions: [
@@ -174,8 +186,9 @@ class _QRScreenState extends State<QRScreen> {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Connected to $nickname!')),
               );
-              // Pop back to the previous screen.
-              Navigator.pop(context);
+              // TODO: Send key exchange message with our public key
+              // For now just pop back to the previous screen.
+              Navigator.pop(context, {'peerId': peerId, 'pubKey': peerPubKey});
             },
           ),
         ],
@@ -289,7 +302,7 @@ class _QRScreenState extends State<QRScreen> {
 
   Widget _buildShowMode(ThemeData theme, ColorScheme colorScheme) {
     final qrData =
-        'ripple:$_localPeerId?nick=${Uri.encodeComponent(_nickname)}';
+        'ripple://$_localPeerId?nick=${Uri.encodeComponent(_nickname)}&pk=${Uri.encodeComponent(_localPubKey)}';
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),

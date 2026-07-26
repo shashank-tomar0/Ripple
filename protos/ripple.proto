@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package ripple;
+
+option go_package = "github.com/shashank-tomar0/Ripple/protos";
+
+// RippleMessage is the envelope for all mesh messages.
+message RippleMessage {
+  string id = 1;
+  string type = 2;           // chat, file, sos, delivery_ack, peer_info, key_exchange
+  string sender = 3;
+  string sender_nick = 4;
+  string recipient = 5;      // empty = broadcast
+  bytes payload = 6;         // JSON or encrypted payload
+  int64 timestamp = 7;       // Unix nanoseconds
+  int32 ttl = 8;
+  int32 hop_count = 9;
+  string nonce = 10;         // E2E encryption nonce (if encrypted)
+  string key_id = 11;        // first 8 chars of sender's Curve25519 pubkey
+}
+
+// FileMetadata for file transfer announcements.
+message FileMetadata {
+  string file_id = 1;
+  string filename = 2;
+  int64 file_size = 3;
+  string mime_type = 4;
+  int32 chunk_count = 5;
+}
+
+// SOSPayload for emergency alerts.
+message SOSPayload {
+  string urgency = 1;
+  string message = 2;
+  double latitude = 3;
+  double longitude = 4;
+  double accuracy = 5;
+  int64 timestamp = 6;
+  int32 expire_minutes = 7;
+  bool ack_required = 8;
+}

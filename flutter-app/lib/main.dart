@@ -12,6 +12,7 @@ import 'models/contact.dart';
 import 'models/message.dart';
 import 'services/daemon_service.dart';
 import 'services/app_state.dart';
+import 'services/foreground_service.dart';
 
 // ============================================================
 // Screen imports
@@ -69,12 +70,19 @@ void main() async {
   // Create daemon service (LocalDaemonService emits fake data for demo/dev).
   final daemonService = LocalDaemonService();
 
-  // Kick off connection attempt — runs in background, no need to await.
-  unawaited(daemonService.connect());
-
   // Restore theme preference.
   final themeNotifier = AppThemeNotifier();
   await themeNotifier.loadFromPrefs();
+
+  // Restore background service state and start if enabled.
+  final prefs = await SharedPreferences.getInstance();
+  final backgroundServiceEnabled = prefs.getBool('background_service') ?? false;
+  if (backgroundServiceEnabled) {
+    unawaited(ForegroundService.start());
+  }
+
+  // Kick off connection attempt — runs in background, no need to await.
+  unawaited(daemonService.connect());
 
   runApp(
     MultiProvider(

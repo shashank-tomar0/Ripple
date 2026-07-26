@@ -203,7 +203,34 @@ func (n *Node) Start() error {
 		n.log.Printf("📡 PubSub topic: %s", PubSubTopic)
 	}
 
+	// Start periodic dedup cache cleanup
+	n.StartSeenCleanup(n.ctx)
+
 	return nil
+}
+
+// StartSeenCleanup periodically prunes old message IDs from the dedup map.
+// Prevents unbounded memory growth. Runs until ctx is cancelled.
+func (n *Node) StartSeenCleanup(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				n.seenLock.Lock()
+				// Reset the map periodically — old entries expire naturally
+				// since message IDs are random and collisions are astronomically unlikely
+				n.seen = make(map[string]bool)
+				n.seenLock.Unlock()
+				if n.Debug {
+					n.log.Printf("pruned dedup cache")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // Close shuts down the node.

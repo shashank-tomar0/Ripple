@@ -7,6 +7,7 @@ class Contact {
   final String peerId;
   final String nickname;
   final String? publicKey;
+  final String? e2eKeyId;
   final bool isOnline;
   final DateTime lastSeen;
   final int hopCount;
@@ -15,6 +16,7 @@ class Contact {
     required this.peerId,
     required this.nickname,
     this.publicKey,
+    this.e2eKeyId,
     this.isOnline = false,
     DateTime? lastSeen,
     this.hopCount = 0,
@@ -24,6 +26,7 @@ class Contact {
         peerId: json['peer_id'] as String,
         nickname: json['nickname'] as String? ?? json['peer_id'].toString().substring(0, 8),
         publicKey: json['public_key'] as String?,
+        e2eKeyId: json['e2e_key_id'] as String?,
         isOnline: json['is_online'] as bool? ?? false,
         lastSeen: json['last_seen'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['last_seen'] as int)
@@ -35,6 +38,7 @@ class Contact {
         'peer_id': peerId,
         'nickname': nickname,
         'public_key': publicKey,
+        'e2e_key_id': e2eKeyId,
         'is_online': isOnline,
         'last_seen': lastSeen.millisecondsSinceEpoch,
         'hop_count': hopCount,
@@ -43,6 +47,9 @@ class Contact {
   String get shortId => peerId.length > 8 ? peerId.substring(0, 8) : peerId;
 
   String get displayName => nickname.isNotEmpty ? nickname : shortId;
+
+  /// Returns true if we have an E2E encryption key for this contact.
+  bool get hasE2EKey => e2eKeyId != null && e2eKeyId!.isNotEmpty;
 }
 
 class Conversation {

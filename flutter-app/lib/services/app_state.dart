@@ -41,6 +41,7 @@ class AppState extends ChangeNotifier {
   bool get connected => _connected;
   String get localPeerId => _localPeerId;
   String get nickname => _nickname;
+  String get localPubKey => daemon.localPubKey;
   List<Contact> get peers => _peers;
   List<Message> get messages => _messages;
   List<Conversation> get conversations => _conversations;

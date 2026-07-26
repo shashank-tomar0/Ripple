@@ -80,9 +80,10 @@ type Client struct {
 
 // identityMessage is sent to clients immediately on connection.
 type identityMessage struct {
-	Type     string `json:"type"`
-	PeerID   string `json:"peer_id"`
-	Nickname string `json:"nickname"`
+	Type       string `json:"type"`
+	PeerID     string `json:"peer_id"`
+	Nickname   string `json:"nickname"`
+	PublicKey  string `json:"public_key,omitempty"`
 }
 
 // peerEvent is sent when a peer joins or leaves the mesh.
@@ -263,9 +264,10 @@ func (b *Bridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 // sendIdentity sends the identity message to a single client.
 func (b *Bridge) sendIdentity(client *Client) {
 	msg := identityMessage{
-		Type:     "identity",
-		PeerID:   b.peerID,
-		Nickname: b.nickname,
+		Type:       "identity",
+		PeerID:     b.peerID,
+		Nickname:   b.nickname,
+		PublicKey:  b.e2eManager.MyPublicKeyHex(),
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -333,6 +335,12 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 	// Delivery acknowledgment messages - forward to Flutter
 	if msg.Type == message.TypeDeliveryAck {
 		b.BroadcastDeliveryReceipt(msg)
+		return
+	}
+
+	// Key exchange messages - handle E2E key setup
+	if msg.Type == message.TypeKeyExchange {
+		b.handleKeyExchange(msg)
 		return
 	}
 
@@ -539,6 +547,44 @@ func (b *Bridge) BroadcastDeliveryReceipt(msg *message.Message) {
 	data, err := json.Marshal(wsMsg)
 	if err != nil {
 		b.log.Printf("delivery receipt marshal error: %v", err)
+		return
+	}
+	b.broadcast(data)
+}
+
+// handleKeyExchange processes an incoming key exchange message.
+// It stores the peer's public key in the E2E manager and broadcasts
+// the key exchange info to Flutter clients.
+func (b *Bridge) handleKeyExchange(msg *message.Message) {
+	if b.e2eManager == nil {
+		b.log.Printf("⚠️  No E2E manager configured, ignoring key exchange from %s", msg.Sender)
+		return
+	}
+
+	if err := b.e2eManager.HandleKeyExchangeMessage(msg); err != nil {
+		b.log.Printf("⚠️  Failed to handle key exchange from %s: %v", msg.Sender, err)
+		return
+	}
+
+	// Broadcast the key exchange info to Flutter clients so they know
+	// E2E is now established with this peer
+	var payload message.KeyExchangePayload
+	if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+		b.log.Printf("key exchange payload parse error: %v", err)
+		return
+	}
+
+	wsMsg := map[string]interface{}{
+		"type":        "key_exchange",
+		"peer_id":     msg.Sender,
+		"peer_nick":   payload.Nickname,
+		"public_key":  payload.PublicKeyHex,
+		"ts":          msg.Timestamp,
+	}
+
+	data, err := json.Marshal(wsMsg)
+	if err != nil {
+		b.log.Printf("key exchange marshal error: %v", err)
 		return
 	}
 	b.broadcast(data)

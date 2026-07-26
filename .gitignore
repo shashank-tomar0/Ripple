@@ -4,7 +4,6 @@ go-daemon/ripple.exe
 go-daemon/vendor/
 
 # Dependencies
-go-daemon/go.sum
 
 # IDE
 .vscode/

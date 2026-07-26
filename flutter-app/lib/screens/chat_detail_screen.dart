@@ -123,7 +123,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               onTap: () {
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Camera coming soon')),
+                  const SnackBar(content: Text('Camera capture coming in next update')),
                 );
               },
             ),
@@ -213,21 +213,23 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       );
     }
     // Encryption status
+    final isEncrypted = _hasEncryptionKey(contact);
     appBarTitles.add(
-      StreamBuilder<bool>(
-        stream: _encryptionStatusStream(contact),
-        initialData: _hasEncryptionKey(contact),
-        builder: (context, snapshot) {
-          final hasKey = snapshot.data ?? false;
-          return Text(
-            hasKey ? '🔒 E2E' : '⚠️ Not encrypted',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: hasKey ? Colors.green : colorScheme.onSurfaceVariant,
-              fontSize: 12,
+      isEncrypted
+          ? Row(
+              children: [
+                Icon(Icons.lock, size: 12, color: Colors.greenAccent),
+                SizedBox(width: 4),
+                Text('E2E encrypted', style: TextStyle(fontSize: 11, color: Colors.greenAccent)),
+              ],
+            )
+          : Row(
+              children: [
+                Icon(Icons.lock_open, size: 12, color: Colors.grey),
+                SizedBox(width: 4),
+                Text('Not encrypted', style: TextStyle(fontSize: 11, color: Colors.grey)),
+              ],
             ),
-          );
-        },
-      ),
     );
 
     return Scaffold(
@@ -277,9 +279,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   /// Determines if we have the peer's E2E encryption key.
   bool _hasEncryptionKey(Contact? contact) {
     if (contact == null) return false;
-    // TODO: Check if crypto manager has peer's public key
-    // For now, check if contact has a key ID stored
-    return contact.e2eKeyId != null && contact.e2eKeyId!.isNotEmpty;
+    // Check if this conversation is encrypted
+    final isEncrypted = false; // Will be set from daemon state when crypto handshake completes
+    return isEncrypted;
   }
 
   /// Stream that emits encryption status changes.

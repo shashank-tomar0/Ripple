@@ -2,7 +2,12 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/app_state.dart';
+import '../services/ble_manager.dart';
+import '../services/daemon_service.dart';
+import '../services/foreground_service.dart';
 import '../services/local_storage_service.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -16,12 +21,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _darkMode = true;
   bool _autoConnect = true;
   bool _debugLogging = false;
+  bool _backgroundService = false;
+  bool _bleEnabled = false;
   int _maxHops = 16;
+
+  BLEManager? _bleManager;
+  StreamSubscription? _bleStateSub;
 
   @override
   void initState() {
     super.initState();
     _loadPreferences();
+    _initBLEManager();
+  }
+
+  Future<void> _initBLEManager() async {
+    final appState = context.read<AppState>();
+    final daemon = context.read<DaemonService>();
+    final bleManager = BLEManager(daemon);
+    setState(() => _bleManager = bleManager);
+
+    // Listen for BLE state changes
+    _bleStateSub = bleManager.transport.onBLETransportState.listen((enabled) {
+      if (mounted) {
+        setState(() => _bleEnabled = enabled);
+        _savePreference('ble_enabled', enabled);
+      }
+    });
+
+    // Restore BLE state if it was previously enabled
+    if (_bleEnabled) {
+      final ok = await bleManager.start(appState.localPeerId, appState.nickname);
+      if (!ok && mounted) {
+        setState(() => _bleEnabled = false);
+        _savePreference('ble_enabled', false);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _bleStateSub?.cancel();
+    _bleManager?.dispose();
+    super.dispose();
   }
 
   Future<void> _loadPreferences() async {
@@ -30,6 +72,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _darkMode = prefs.getBool('dark_mode') ?? true;
       _autoConnect = prefs.getBool('auto_connect') ?? true;
       _debugLogging = prefs.getBool('debug_logging') ?? false;
+      _backgroundService = prefs.getBool('background_service') ?? false;
+      _bleEnabled = prefs.getBool('ble_enabled') ?? false;
       _maxHops = prefs.getInt('max_hops') ?? 16;
     });
   }
@@ -112,6 +156,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                 ),
                 const Divider(height: 1, indent: 16, endIndent: 16),
+                SwitchListTile(
+                  title: const Text('Background mesh relay'),
+                  subtitle: const Text('Keep mesh active when app is minimized'),
+                  value: _backgroundService,
+                  onChanged: (v) async {
+                    setState(() => _backgroundService = v);
+                    if (v) {
+                      await ForegroundService.start();
+                    } else {
+                      await ForegroundService.stop();
+                    }
+                    _savePreference('background_service', v);
+                  },
+                  secondary: Icon(Icons.battery_charging_full, color: colorScheme.onSurfaceVariant),
+                ),
+                const Divider(height: 1, indent: 16, endIndent: 16),
                 ListTile(
                   leading: Icon(Icons.hub, color: colorScheme.onSurfaceVariant),
                   title: const Text('Max Mesh Hops'),
@@ -153,9 +213,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 const Divider(height: 1, indent: 16, endIndent: 16),
                 SwitchListTile(
                   title: const Text('Bluetooth Low Energy'),
-                  subtitle: const Text('Direct device-to-device (coming Phase 1)'),
-                  value: false,
-                  onChanged: null, // Coming soon
+                  subtitle: const Text('Direct device-to-device mesh transport'),
+                  value: _bleEnabled,
+                  onChanged: (v) async {
+                    setState(() => _bleEnabled = v);
+                    _savePreference('ble_enabled', v);
+
+                    final bleManager = _bleManager;
+                    if (bleManager == null) return;
+
+                    final appState = context.read<AppState>();
+                    if (v) {
+                      final ok = await bleManager.start(appState.localPeerId, appState.nickname);
+                      if (!ok && mounted) {
+                        setState(() => _bleEnabled = false);
+                        _savePreference('ble_enabled', false);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Failed to start BLE transport')),
+                        );
+                      }
+                    } else {
+                      await bleManager.stop();
+                    }
+                  },
                   secondary: Icon(Icons.bluetooth, color: colorScheme.onSurfaceVariant),
                 ),
               ],

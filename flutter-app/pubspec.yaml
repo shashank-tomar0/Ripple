@@ -20,6 +20,7 @@ dependencies:
   file_picker: ^8.0.0
   mime: ^2.0.0
   path: ^1.9.0
+  flutter_blue_plus: ^1.32.0
 
 dev_dependencies:
   flutter_test:

@@ -23,6 +23,7 @@ const (
 	TypeSOS          MessageType = "sos"          // Emergency broadcast
 	TypeDeliveryAck  MessageType = "delivery_ack" // Delivery confirmation
 	TypePeerInfo     MessageType = "peer_info"    // Peer metadata exchange
+	TypeKeyExchange  MessageType = "key_exchange" // E2E key exchange
 )
 
 // DeliveryStatus represents the state of a message delivery.
@@ -298,6 +299,35 @@ func ParseSOSPayload(msg *Message) (*SOSPayload, error) {
 		return nil, fmt.Errorf("parse SOS payload: %w", err)
 	}
 	return &payload, nil
+}
+
+// KeyExchangePayload is the payload for key exchange messages (Phase 1+).
+// Sent when two peers first connect to share Curve25519 public keys.
+type KeyExchangePayload struct {
+	PublicKeyHex string `json:"public_key"` // hex-encoded Curve25519 public key
+	Nickname     string `json:"nickname"`
+	Timestamp    int64  `json:"ts"`
+}
+
+// NewKeyExchange creates a key exchange message containing the sender's
+// Curve25519 public key for E2E encryption setup.
+func NewKeyExchange(sender, senderNick, pubkeyHex string) *Message {
+	payload := KeyExchangePayload{
+		PublicKeyHex: pubkeyHex,
+		Nickname:     senderNick,
+		Timestamp:    time.Now().UnixNano(),
+	}
+	data, _ := json.Marshal(payload)
+	return &Message{
+		ID:         newID(),
+		Type:       TypeKeyExchange,
+		Sender:     sender,
+		SenderNick: senderNick,
+		Payload:    string(data),
+		Timestamp:  time.Now().UnixNano(),
+		TTL:        8,
+		HopCount:   0,
+	}
 }
 
 // IsExpired returns true if the message TTL has reached zero.
