@@ -9,7 +9,8 @@ import (
 )
 
 const (
-	DefaultPort    = 0    // 0 = random port (OS assigns)
+	DefaultPort       = 0    // 0 = random port (OS assigns)
+	DefaultWSPort     = 9876 // WebSocket bridge port
 	DefaultRendezvous = "ripple-chat-v1"
 	DefaultDataDir    = ".ripple"
 )
@@ -18,6 +19,9 @@ const (
 type Config struct {
 	// ListenPort is the port for the libp2p TCP transport. 0 = random.
 	ListenPort int
+
+	// WSPort is the port for the WebSocket bridge server.
+	WSPort int
 
 	// Rendezvous is the DHT rendezvous string for peer discovery.
 	Rendezvous string
@@ -43,6 +47,7 @@ func Parse() *Config {
 	c := &Config{}
 
 	flag.IntVar(&c.ListenPort, "port", DefaultPort, "TCP listen port (0 = random)")
+	flag.IntVar(&c.WSPort, "wsport", DefaultWSPort, "WebSocket bridge port")
 	flag.StringVar(&c.Rendezvous, "rdv", DefaultRendezvous, "Rendezvous string for peer discovery")
 	flag.StringVar(&c.Nickname, "nick", "", "Display nickname")
 	flag.BoolVar(&c.Debug, "debug", false, "Enable debug logging")
