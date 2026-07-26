@@ -1,0 +1,287 @@
+// DaemonService provides the communication layer between the Flutter UI
+// and the Ripple Go daemon. Phase 0 uses WebSocket; future phases may
+// use gRPC or platform channels for lower latency.
+//
+// The abstract interface allows swapping implementations:
+//   - WebSocketDaemonService: connects to the Go daemon (production)
+//   - LocalDaemonService: simulated messages for demo/dev
+library;
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'package:flutter/foundation.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import '../models/message.dart';
+import '../models/contact.dart';
+
+/// Callback types for daemon events.
+typedef MessageCallback = void Function(Message message);
+typedef PeerCallback = void Function(Contact contact);
+typedef ConnectionCallback = void Function(bool connected);
+
+/// Abstract interface for daemon communication.
+abstract class DaemonService {
+  bool get isConnected;
+  String get localPeerId;
+  String get nickname;
+
+  Future<bool> connect({String host = 'localhost', int port = 9876});
+  Future<void> disconnect();
+
+  Future<bool> sendMessage(Message message);
+  Future<List<Contact>> getPeers();
+  Future<List<Conversation>> getConversations();
+  Future<List<Message>> getMessages(String peerId);
+
+  Stream<Message> get onMessage;
+  Stream<Contact> get onPeerJoined;
+  Stream<Contact> get onPeerLeft;
+  Stream<bool> get onConnectionState;
+}
+
+/// WebSocket implementation — connects to the Ripple Go daemon.
+class WebSocketDaemonService extends DaemonService {
+  WebSocketChannel? _channel;
+  bool _connected = false;
+  String _peerId = '';
+  String _nick = '';
+
+  final _messageController = StreamController<Message>.broadcast();
+  final _peerJoinController = StreamController<Contact>.broadcast();
+  final _peerLeaveController = StreamController<Contact>.broadcast();
+  final _connectionController = StreamController<bool>.broadcast();
+
+  @override
+  bool get isConnected => _connected;
+
+  @override
+  String get localPeerId => _peerId;
+
+  @override
+  String get nickname => _nick;
+
+  @override
+  Future<bool> connect({String host = 'localhost', int port = 9876}) async {
+    try {
+      final uri = Uri.parse('ws://$host:$port/ws');
+      _channel = WebSocketChannel.connect(uri);
+      await _channel!.ready;
+      _connected = true;
+      _connectionController.add(true);
+      _listen();
+      return true;
+    } catch (e) {
+      debugPrint('WebSocket connect failed: $e');
+      _connected = false;
+      _connectionController.add(false);
+      return false;
+    }
+  }
+
+  @override
+  Future<void> disconnect() async {
+    await _channel?.sink.close();
+    _connected = false;
+    _connectionController.add(false);
+  }
+
+  void _listen() {
+    _channel!.stream.listen(
+      (data) {
+        try {
+          final json = jsonDecode(data as String) as Map<String, dynamic>;
+          _handleMessage(json);
+        } catch (e) {
+          debugPrint('WS parse error: $e');
+        }
+      },
+      onError: (error) {
+        debugPrint('WS error: $error');
+        _connected = false;
+        _connectionController.add(false);
+      },
+      onDone: () {
+        _connected = false;
+        _connectionController.add(false);
+      },
+    );
+  }
+
+  void _handleMessage(Map<String, dynamic> json) {
+    final type = json['type'] as String?;
+
+    switch (type) {
+      case 'identity':
+        _peerId = json['peer_id'] as String? ?? '';
+        _nick = json['nickname'] as String? ?? '';
+        break;
+      case 'chat':
+      case 'file':
+      case 'sos':
+        _messageController.add(Message.fromJson(json));
+        break;
+      case 'peer_join':
+        _peerJoinController.add(Contact.fromJson(json['peer'] as Map<String, dynamic>));
+        break;
+      case 'peer_leave':
+        _peerLeaveController.add(Contact.fromJson(json['peer'] as Map<String, dynamic>));
+        break;
+    }
+  }
+
+  @override
+  Future<bool> sendMessage(Message message) async {
+    if (!_connected || _channel == null) return false;
+    try {
+      _channel!.sink.add(jsonEncode(message.toJson()));
+      return true;
+    } catch (e) {
+      debugPrint('Send error: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<List<Contact>> getPeers() async => [];
+
+  @override
+  Future<List<Conversation>> getConversations() async => [];
+
+  @override
+  Future<List<Message>> getMessages(String peerId) async => [];
+
+  @override
+  Stream<Message> get onMessage => _messageController.stream;
+
+  @override
+  Stream<Contact> get onPeerJoined => _peerJoinController.stream;
+
+  @override
+  Stream<Contact> get onPeerLeft => _peerLeaveController.stream;
+
+  @override
+  Stream<bool> get onConnectionState => _connectionController.stream;
+}
+
+/// Local demo service — generates fake messages for UI development.
+class LocalDaemonService extends DaemonService {
+  bool _connected = false;
+  final _messageController = StreamController<Message>.broadcast();
+  final _peerJoinController = StreamController<Contact>.broadcast();
+  final _peerLeaveController = StreamController<Contact>.broadcast();
+  final _connectionController = StreamController<bool>.broadcast();
+
+  final _contacts = <Contact>[
+    Contact(peerId: '12D3KooW9a…v1x2', nickname: 'Alice', isOnline: true, hopCount: 0),
+    Contact(peerId: '12D3KooW8b…q3w4', nickname: 'Bob', isOnline: true, hopCount: 1),
+    Contact(peerId: '12D3KooW7c…r5t6', nickname: 'Carol', isOnline: false, hopCount: 2),
+  ];
+
+  final _messages = <String, List<Message>>{};
+  final _rand = Random(42);
+
+  @override
+  bool get isConnected => _connected;
+
+  @override
+  String get localPeerId => '12D3KooW0demo1234567';
+
+  @override
+  String get nickname => 'You';
+
+  @override
+  Future<bool> connect({String host = 'localhost', int port = 9876}) async {
+    _connected = true;
+    _connectionController.add(true);
+    _peerJoinController.add(_contacts[0]);
+    _peerJoinController.add(_contacts[1]);
+    return true;
+  }
+
+  @override
+  Future<void> disconnect() async {
+    _connected = false;
+    _connectionController.add(false);
+  }
+
+  @override
+  Future<bool> sendMessage(Message message) async {
+    _messages.putIfAbsent(
+        message.recipient ?? 'broadcast', () => []);
+    _messages[message.recipient ?? 'broadcast']!.insert(0, message);
+    message.isSent = true;
+    _messageController.add(message);
+
+    // Simulate a reply after 1-2 seconds
+    if (message.recipient != null) {
+      Future.delayed(Duration(seconds: 1 + _rand.nextInt(2)), () {
+        final reply = Message(
+          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          type: 'chat',
+          sender: message.recipient!,
+          senderNick: _contacts
+                  .where((c) => c.peerId == message.recipient)
+                  .firstOrNull
+                  ?.nickname ??
+              'Unknown',
+          recipient: localPeerId,
+          payload: _randomReply(),
+          timestamp: DateTime.now().microsecondsSinceEpoch,
+        );
+        _messages.putIfAbsent(reply.sender, () => []);
+        _messages[reply.sender]!.insert(0, reply);
+        _messageController.add(reply);
+      });
+    }
+    return true;
+  }
+
+  String _randomReply() {
+    final replies = [
+      'Got it! 👋',
+      'That works for me',
+      'Where are you right now?',
+      'Can you send that again?',
+      '👍',
+      'Sure, on my way!',
+      'Haha 😄',
+      'Let me check and get back to you',
+      'Perfect timing!',
+      'I\'ll be there in 5',
+    ];
+    return replies[_rand.nextInt(replies.length)];
+  }
+
+  @override
+  Future<List<Contact>> getPeers() async => _contacts;
+
+  @override
+  Future<List<Conversation>> getConversations() async {
+    return _contacts.map((c) {
+      final msgs = _messages[c.peerId] ?? [];
+      return Conversation(
+        contact: c,
+        lastMessage: msgs.isNotEmpty ? msgs.first : null,
+        unreadCount: msgs.where((m) => !m.isSent && m.isIncoming).length,
+      );
+    }).toList();
+  }
+
+  @override
+  Future<List<Message>> getMessages(String peerId) async {
+    return _messages[peerId] ?? [];
+  }
+
+  @override
+  Stream<Message> get onMessage => _messageController.stream;
+
+  @override
+  Stream<Contact> get onPeerJoined => _peerJoinController.stream;
+
+  @override
+  Stream<Contact> get onPeerLeft => _peerLeaveController.stream;
+
+  @override
+  Stream<bool> get onConnectionState => _connectionController.stream;
+}
