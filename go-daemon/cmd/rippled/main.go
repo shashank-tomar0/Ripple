@@ -28,6 +28,7 @@ import (
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/identity"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/mesh"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/sos"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/store"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/wsbridge"
 )
@@ -116,6 +117,16 @@ func main() {
 	}
 	node = n
 
+	// Initialize E2E encryption manager
+	e2eManager, err := crypto.NewManager(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  E2E encryption unavailable: %v\n", err)
+		fmt.Println("   Messages will be sent without encryption.")
+		e2eManager = nil
+	} else {
+		fmt.Printf("🔐 E2E encryption ready (key: %s…)\n", e2eManager.MyKeyID())
+	}
+
 	// Set up message handler
 	n.OnMessage = handleIncomingMessage
 	n.OnPeerJoin = handlePeerJoin
@@ -144,7 +155,7 @@ func main() {
 	fmt.Println()
 
 	// Start WebSocket bridge for Flutter app connectivity
-	bridge := wsbridge.NewBridge(n, id.PeerID.String(), nickname, cfg.WSPort)
+	bridge := wsbridge.NewBridge(n, id.PeerID.String(), nickname, cfg.WSPort, e2eManager)
 	if err := bridge.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ WebSocket bridge error: %v\n", err)
 		os.Exit(1)
@@ -159,6 +170,20 @@ func main() {
 	}
 	ftManager.Start(ctx)
 	fmt.Printf("📁 File transfer manager ready (chunk size: %dKB)\n", filetransfer.DefaultChunkSize/1024)
+	fmt.Println()
+
+	// Start SOS emergency broadcast manager
+	sosManager := sos.NewManager(n)
+	sosManager.OnSOSReceived = func(alert *sos.ActiveAlert) {
+		bridge.BroadcastSOS(alert.Message)
+	}
+	sosManager.OnSOSExpired = func(alertID string) {
+		if n.Debug {
+			n.Log.Printf("🚨 SOS alert expired: %s", alertID[:8])
+		}
+	}
+	sosManager.Start(ctx)
+	fmt.Printf("🚨 SOS emergency broadcast manager ready (TTL=%d, active=%v)\n", sos.MaxTTL, sos.ActiveDuration)
 	fmt.Println()
 
 	fmt.Printf("✅ Ripple is running! Type /help for commands.\n\n")

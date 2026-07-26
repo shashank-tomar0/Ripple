@@ -324,6 +324,18 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 		return
 	}
 
+	// SOS-type messages get special handling with extra fields
+	if msg.Type == message.TypeSOS {
+		b.BroadcastSOS(msg)
+		return
+	}
+
+	// Delivery acknowledgment messages - forward to Flutter
+	if msg.Type == message.TypeDeliveryAck {
+		b.BroadcastDeliveryReceipt(msg)
+		return
+	}
+
 	// Default: serialize the mesh message and broadcast to all WS clients.
 	// Add encrypted flag so Flutter can show the padlock icon.
 	data, err := msg.Serialize()
@@ -342,6 +354,43 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 	data, err = json.Marshal(wsMsg)
 	if err != nil {
 		b.log.Printf("message marshal error: %v", err)
+		return
+	}
+	b.broadcast(data)
+}
+
+// BroadcastSOS sends an SOS message to all WebSocket clients with
+// special flags for high-visibility UI treatment.
+func (b *Bridge) BroadcastSOS(msg *message.Message) {
+	// Parse SOS payload for extra fields
+	var sosPayload message.SOSPayload
+	if err := json.Unmarshal([]byte(msg.Payload), &sosPayload); err != nil {
+		b.log.Printf("SOS payload parse error: %v", err)
+	}
+
+	// Build the WebSocket message with SOS-specific fields
+	wsMsg := map[string]interface{}{
+		"type":        "sos",
+		"id":          msg.ID,
+		"sender":      msg.Sender,
+		"sender_nick": msg.SenderNick,
+		"payload":     msg.Payload,
+		"ts":          msg.Timestamp,
+		"ttl":         msg.TTL,
+		"hops":        msg.HopCount,
+		"sos":         true,
+		"urgency":     sosPayload.Urgency,
+		"message":     sosPayload.Message,
+		"lat":         sosPayload.Latitude,
+		"lon":         sosPayload.Longitude,
+		"accuracy":    sosPayload.Accuracy,
+		"expire_min":  sosPayload.AutoExpire,
+		"ack_required": sosPayload.AckRequired,
+	}
+
+	data, err := json.Marshal(wsMsg)
+	if err != nil {
+		b.log.Printf("SOS marshal error: %v", err)
 		return
 	}
 	b.broadcast(data)
@@ -455,14 +504,44 @@ func (b *Bridge) sendPeerEvent(evt peerEvent) {
 	b.broadcast(data)
 }
 
-// unregisterClient removes a client from the bridge's client set and
-// logs the remaining connection count.
-func (b *Bridge) unregisterClient(c *Client) {
-	b.clientsMu.Lock()
-	delete(b.clients, c)
-	count := len(b.clients)
-	b.clientsMu.Unlock()
-	b.log.Printf("WebSocket client disconnected (%d remaining)", count)
+// BroadcastDeliveryReceipt parses a delivery acknowledgment message and broadcasts
+// it to all connected WebSocket clients.
+//
+// WS message format:
+// {
+//   "type": "delivery_ack",
+//   "msg_id": "abc123",
+//   "status": "delivered",
+//   "original_sender": "12D3...",
+//   "ts": 1700000000000000000,
+//   "hops": 3
+// }
+func (b *Bridge) BroadcastDeliveryReceipt(msg *message.Message) {
+	var info message.DeliveryInfo
+	if err := json.Unmarshal([]byte(msg.Payload), &info); err != nil {
+		b.log.Printf("delivery receipt parse error: %v", err)
+		return
+	}
+
+	wsMsg := map[string]interface{}{
+		"type":            "delivery_ack",
+		"msg_id":          info.MessageID,
+		"status":          string(info.Status),
+		"original_sender": info.OriginalSender,
+		"ts":              info.Timestamp,
+		"hops":            info.HopCount,
+	}
+
+	if info.Error != "" {
+		wsMsg["error"] = info.Error
+	}
+
+	data, err := json.Marshal(wsMsg)
+	if err != nil {
+		b.log.Printf("delivery receipt marshal error: %v", err)
+		return
+	}
+	b.broadcast(data)
 }
 
 // --- Client I/O ---

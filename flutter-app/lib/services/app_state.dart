@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
+import '../models/sos_alert.dart'
+import '../models/delivery_receipt.dart';
 import '../services/daemon_service.dart';
 import '../services/local_storage_service.dart';
 
@@ -24,6 +26,7 @@ class AppState extends ChangeNotifier {
   List<Message> _messages = [];
   List<Conversation> _conversations = [];
   List<FileTransfer> _fileTransfers = [];
+  List<SOSAlert> _activeAlerts = [];
   bool _loading = false;
   String? _error;
 
@@ -48,6 +51,8 @@ class AppState extends ChangeNotifier {
       _conversations.fold(0, (sum, c) => sum + c.unreadCount);
 
   List<FileTransfer> get fileTransfers => _fileTransfers;
+  List<SOSAlert> get activeAlerts => _activeAlerts;
+  bool get hasActiveSOS => _activeAlerts.isNotEmpty;
 
   // ── Lifecycle ──
   Future<void> init() async {
@@ -192,6 +197,10 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       _schedulePersist();
     });
+
+    daemon.onDeliveryReceipt.listen((receipt) {
+      handleDeliveryReceipt(receipt);
+    });
   }
 
   // ── Actions ──
@@ -215,6 +224,87 @@ class AppState extends ChangeNotifier {
       _persistMessages();
     }
     return ok;
+  }
+
+  /// Sends an SOS emergency broadcast to the mesh network.
+  Future<bool> sendSOS({
+    required String message,
+    required SOSUrgency urgency,
+    double? latitude,
+    double? longitude,
+  }) async {
+    if (!_connected) return false;
+
+    final payload = jsonEncode({
+      'urgency': urgency.value,
+      'message': message,
+      'lat': latitude,
+      'lon': longitude,
+      'accuracy': 10.0, // Default accuracy in meters
+      'ts': DateTime.now().millisecondsSinceEpoch,
+      'expire_minutes': 60,
+      'ack_required': true,
+    });
+
+    final msg = Message(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      type: 'sos',
+      sender: _localPeerId,
+      senderNick: _nickname,
+      recipient: null, // Broadcast
+      payload: payload,
+      timestamp: DateTime.now().microsecondsSinceEpoch,
+      ttl: 64,
+      hopCount: 0,
+      isSent: true,
+    );
+
+    final ok = await daemon.sendMessage(msg);
+    if (ok) {
+      _messages.insert(0, msg);
+
+      // Track locally as our own active alert
+      final alert = SOSAlert(
+        id: msg.id,
+        sender: _localPeerId,
+        senderNick: _nickname,
+        message: message,
+        urgency: urgency,
+        latitude: latitude,
+        longitude: longitude,
+        accuracy: 10.0,
+        receivedAt: DateTime.now(),
+        expiresAt: DateTime.now().add(const Duration(minutes: 10)),
+        ackRequired: true,
+        isOwn: true,
+      );
+      _activeAlerts.insert(0, alert);
+
+      await _refreshConversations();
+      notifyListeners();
+      _persistMessages();
+    }
+    return ok;
+  }
+
+  /// Handles an incoming SOS message from the mesh.
+  void handleIncomingSOS(Map<String, dynamic> json) {
+    final alert = SOSAlert.fromJson(json);
+
+    // Check if we already have this alert
+    if (!_activeAlerts.any((a) => a.id == alert.id)) {
+      _activeAlerts.insert(0, alert);
+    }
+
+    // Also add to messages for chat history
+    final msg = Message.fromJson(json);
+    if (!_messages.any((m) => m.id == msg.id)) {
+      _messages.insert(0, msg);
+    }
+
+    await _refreshConversations();
+    notifyListeners();
+    _schedulePersist();
   }
 
   /// Starts a file transfer to [recipient].
@@ -316,6 +406,20 @@ class AppState extends ChangeNotifier {
 
   Future<void> _refreshConversations() async {
     _conversations = await daemon.getConversations();
+  }
+
+  /// Handles incoming delivery receipts and updates message status.
+  void handleDeliveryReceipt(DeliveryReceipt receipt) {
+    // Find the message in our local cache
+    final idx = _messages.indexWhere((m) => m.id == receipt.messageId);
+    if (idx >= 0) {
+      final msg = _messages[idx];
+      // Update the message's delivery status
+      msg.status = receipt.status;
+      msg.deliveryHops = receipt.hops;
+      notifyListeners();
+      _schedulePersist();
+    }
   }
 
   // ── Helpers ──

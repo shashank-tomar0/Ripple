@@ -32,7 +32,6 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/multiformats/go-multiaddr"
 
-	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/delivery"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 )
 
@@ -82,7 +81,7 @@ type Node struct {
 	seen     map[string]bool // dedup message IDs
 
 	// Delivery receipt manager
-	ReceiptManager *delivery.ReceiptManager
+	// ReceiptManager interface{} // placeholder for delivery receipts (to avoid import cycle)
 
 	// Logging
 	Debug bool
@@ -385,7 +384,7 @@ func (n *Node) deliverMessage(msg *message.Message) {
 
 	// Auto-acknowledge delivery receipt for messages addressed to us
 	// (chat, file, sos messages that have us as the recipient)
-	if n.ReceiptManager != nil && msg.Recipient == n.Host.ID().String() && msg.Sender != n.Host.ID().String() {
+	if msg.Recipient == n.Host.ID().String() && msg.Sender != n.Host.ID().String() {
 		// Don't auto-ack our own messages
 		if msg.Type == message.TypeChat || msg.Type == message.TypeFile || msg.Type == message.TypeSOS {
 			// Send "received" ack immediately
@@ -393,9 +392,6 @@ func (n *Node) deliverMessage(msg *message.Message) {
 			// Use a short TTL for acks (high priority, short distance)
 			ack.TTL = 8
 			_ = n.SendMessage(ack)
-
-			// Also mark locally as received
-			n.ReceiptManager.MarkReceived(msg.ID)
 		}
 	}
 }

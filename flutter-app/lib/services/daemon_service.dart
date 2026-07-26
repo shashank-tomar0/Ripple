@@ -1,10 +1,5 @@
-// DaemonService provides the communication layer between the Flutter UI
-// and the Ripple Go daemon. Phase 0 uses WebSocket; future phases may
-// use gRPC or platform channels for lower latency.
-//
-// The abstract interface allows swapping implementations:
-//   - WebSocketDaemonService: connects to the Go daemon (production)
-//   - LocalDaemonService: simulated messages for demo/dev
+// Package models defines the data types shared across the Ripple Flutter app.
+// These mirror the Go daemon's message types for seamless serialization.
 library;
 
 import 'dart:async';
@@ -15,11 +10,13 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
+import '../models/delivery_receipt.dart';
 
 /// Callback types for daemon events.
 typedef MessageCallback = void Function(Message message);
 typedef PeerCallback = void Function(Contact contact);
 typedef ConnectionCallback = void Function(bool connected);
+typedef DeliveryReceiptCallback = void Function(DeliveryReceipt receipt);
 
 /// Abstract interface for daemon communication.
 abstract class DaemonService {
@@ -40,6 +37,7 @@ abstract class DaemonService {
   Stream<Contact> get onPeerJoined;
   Stream<Contact> get onPeerLeft;
   Stream<bool> get onConnectionState;
+  Stream<DeliveryReceipt> get onDeliveryReceipt;
 }
 
 /// WebSocket implementation — connects to the Ripple Go daemon.
@@ -54,6 +52,7 @@ class WebSocketDaemonService extends DaemonService {
   final _peerJoinController = StreamController<Contact>.broadcast();
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
+  final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
 
   @override
   bool get isConnected => _connected;
@@ -66,6 +65,9 @@ class WebSocketDaemonService extends DaemonService {
 
   @override
   Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
+
+  @override
+  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 
   @override
   Future<bool> connect({String host = 'localhost', int port = 9876}) async {
@@ -139,6 +141,9 @@ class WebSocketDaemonService extends DaemonService {
       case 'peer_leave':
         _peerLeaveController.add(Contact.fromJson(json['peer'] as Map<String, dynamic>));
         break;
+      case 'delivery_ack':
+        _deliveryReceiptController.add(DeliveryReceipt.fromJson(json));
+        break;
     }
   }
 
@@ -174,6 +179,9 @@ class WebSocketDaemonService extends DaemonService {
 
   @override
   Stream<bool> get onConnectionState => _connectionController.stream;
+
+  @override
+  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 }
 
 /// Local demo service — generates fake messages for UI development.
@@ -184,6 +192,7 @@ class LocalDaemonService extends DaemonService {
   final _peerJoinController = StreamController<Contact>.broadcast();
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
+  final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
 
   final _contacts = <Contact>[
     Contact(peerId: '12D3KooW9a…v1x2', nickname: 'Alice', isOnline: true, hopCount: 0),
@@ -205,6 +214,9 @@ class LocalDaemonService extends DaemonService {
 
   @override
   Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
+
+  @override
+  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 
   @override
   Future<bool> connect({String host = 'localhost', int port = 9876}) async {
@@ -229,13 +241,36 @@ class LocalDaemonService extends DaemonService {
     message.isSent = true;
     _messageController.add(message);
 
-    // Simulate file transfer progress if this is a file message
-    if (message.isFile && message.recipient != null) {
-      _simulateFileTransfer(message);
-    }
-
-    // Simulate a reply after 1-2 seconds
+    // Simulate delivery receipts: sent -> delivered -> read
     if (message.recipient != null) {
+      // "sent" is immediate
+      _deliveryReceiptController.add(DeliveryReceipt(
+        messageId: message.id,
+        status: DeliveryStatus.sent,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+
+      // "delivered" after 0.5-1 second
+      Future.delayed(Duration(milliseconds: 500 + _rand.nextInt(500)), () {
+        _deliveryReceiptController.add(DeliveryReceipt(
+          messageId: message.id,
+          status: DeliveryStatus.delivered,
+          hops: 1 + _rand.nextInt(3),
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ));
+      });
+
+      // "read" after 2-5 seconds
+      Future.delayed(Duration(seconds: 2 + _rand.nextInt(3)), () {
+        _deliveryReceiptController.add(DeliveryReceipt(
+          messageId: message.id,
+          status: DeliveryStatus.read,
+          hops: 1 + _rand.nextInt(3),
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ));
+      });
+
+      // Simulate a reply after 1-2 seconds
       Future.delayed(Duration(seconds: 1 + _rand.nextInt(2)), () {
         final reply = Message(
           id: DateTime.now().microsecondsSinceEpoch.toString(),
@@ -255,6 +290,12 @@ class LocalDaemonService extends DaemonService {
         _messageController.add(reply);
       });
     }
+
+    // Simulate file transfer progress if this is a file message
+    if (message.isFile && message.recipient != null) {
+      _simulateFileTransfer(message);
+    }
+
     return true;
   }
 
@@ -348,4 +389,7 @@ class LocalDaemonService extends DaemonService {
 
   @override
   Stream<bool> get onConnectionState => _connectionController.stream;
+
+  @override
+  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 }

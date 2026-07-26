@@ -11,6 +11,7 @@ import '../services/file_picker_service.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
+import '../models/delivery_receipt.dart';
 
 /// Chat detail screen — displays messages with a single peer and provides
 /// a text input bar for sending new messages.
@@ -44,6 +45,22 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// Retries sending a failed message.
+  void _retrySend(Message message) {
+    final appState = context.read<AppState>();
+    // Update local status to sending
+    message.status = DeliveryStatus.sending;
+    setState(() {});
+
+    // Send the message
+    appState.sendMessage(message.payload, recipient: widget.peerId).then((ok) {
+      if (ok && mounted) {
+        message.status = DeliveryStatus.sent;
+        setState(() {});
+      }
+    });
   }
 
   /// Scrolls the message list to the bottom (newest message).
@@ -180,7 +197,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       _scrollToBottom();
     }
 
-    // Build hop-count subtitle for the AppBar.
+    // Build AppBar title with encryption status
     final List<Widget> appBarTitles = [
       Text(contact?.displayName ?? 'Unknown'),
     ];
@@ -195,6 +212,23 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         ),
       );
     }
+    // Encryption status
+    appBarTitles.add(
+      StreamBuilder<bool>(
+        stream: _encryptionStatusStream(contact),
+        initialData: _hasEncryptionKey(contact),
+        builder: (context, snapshot) {
+          final hasKey = snapshot.data ?? false;
+          return Text(
+            hasKey ? '🔒 E2E' : '⚠️ Not encrypted',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: hasKey ? Colors.green : colorScheme.onSurfaceVariant,
+              fontSize: 12,
+            ),
+          );
+        },
+      ),
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -238,6 +272,21 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         ],
       ),
     );
+  }
+
+  /// Determines if we have the peer's E2E encryption key.
+  bool _hasEncryptionKey(Contact? contact) {
+    if (contact == null) return false;
+    // TODO: Check if crypto manager has peer's public key
+    // For now, check if contact has a key ID stored
+    return contact.e2eKeyId != null && contact.e2eKeyId!.isNotEmpty;
+  }
+
+  /// Stream that emits encryption status changes.
+  Stream<bool> _encryptionStatusStream(Contact? contact) {
+    // For now, just return a static value. In the future, this could
+    // listen to the AppState for key exchange events.
+    return Stream.value(_hasEncryptionKey(contact));
   }
 
   /// Empty-state widget shown when no messages exist yet.
@@ -425,9 +474,27 @@ class _MessageBubble extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          message.payload,
-          style: TextStyle(color: textColor, fontSize: 15),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Flexible(
+              child: Text(
+                message.payload,
+                style: TextStyle(color: textColor, fontSize: 15),
+              ),
+            ),
+            if (message.encrypted) ...[
+              const SizedBox(width: 6),
+              Icon(
+                Icons.lock,
+                size: 14,
+                color: isOwn
+                    ? colorScheme.onPrimary.withOpacity(0.7)
+                    : colorScheme.onSurfaceVariant.withOpacity(0.7),
+              ),
+            ],
+          ],
         ),
         const SizedBox(height: 4),
         Row(
@@ -439,16 +506,88 @@ class _MessageBubble extends StatelessWidget {
             ),
             if (isOwn) ...[
               const SizedBox(width: 4),
+              _buildStatusIcon(message, timeColor),
+            ],
+            if (!message.encrypted && !isOwn) ...[
+              const SizedBox(width: 6),
               Icon(
-                Icons.check,
-                size: 14,
-                color: timeColor,
+                Icons.lock_open,
+                size: 12,
+                color: colorScheme.onSurfaceVariant.withOpacity(0.4),
               ),
             ],
           ],
         ),
       ],
     );
+  }
+
+  /// Builds the status icon based on message delivery status.
+  Widget _buildStatusIcon(Message message, Color timeColor) {
+    if (!message.isSent) {
+      // This shouldn't happen for received messages, but handle gracefully
+      return const SizedBox.shrink();
+    }
+
+    switch (message.status) {
+      case DeliveryStatus.sending:
+        return SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(
+            strokeWidth: 1.5,
+            valueColor: AlwaysStoppedAnimation<Color>(timeColor),
+          ),
+        );
+      case DeliveryStatus.sent:
+        return Icon(
+          Icons.check,
+          size: 14,
+          color: timeColor,
+        );
+      case DeliveryStatus.delivered:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check, size: 14, color: colorScheme.primary),
+            const SizedBox(width: 2),
+            Icon(Icons.check, size: 14, color: colorScheme.primary),
+          ],
+        );
+      case DeliveryStatus.read:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check, size: 14, color: colorScheme.primary),
+            const SizedBox(width: 2),
+            Icon(Icons.check, size: 14, color: colorScheme.primary),
+          ],
+        );
+      case DeliveryStatus.failed:
+        return GestureDetector(
+          onTap: () => _retrySend(message),
+          child: Icon(
+            Icons.error_outline,
+            size: 14,
+            color: colorScheme.error,
+          ),
+        );
+      default:
+        return Icon(
+          Icons.check,
+          size: 14,
+          color: timeColor,
+        );
+    }
+  }
+
+  /// Retries sending a failed message.
+  void _retrySend(Message message) {
+    final appState = context.read<AppState>();
+    // For now, just update status to sending
+    message.status = DeliveryStatus.sending;
+    notifyListeners();
+    // In a real implementation, you'd call appState.sendMessage(...)
   }
 
   /// Renders a file message bubble with icon, name, size, progress bar, and status.

@@ -46,12 +46,11 @@ type KeypairFile struct {
 
 // GenerateKeypair creates a new Curve25519 keypair for E2E encryption.
 func GenerateKeypair() (*Keypair, error) {
-	var pub, priv [32]byte
-	_, err := box.GenerateKey(&pub, &priv, rand.Reader)
+	pub, priv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate keypair: %w", err)
 	}
-	return &Keypair{PublicKey: pub, PrivateKey: priv}, nil
+	return &Keypair{PublicKey: *pub, PrivateKey: *priv}, nil
 }
 
 // LoadOrCreateKeypair loads keys from ~/.ripple/e2e-keys/ or creates new ones.
@@ -137,7 +136,9 @@ func LoadKeypair(path string) (*Keypair, error) {
 // SharedSecret computes ECDH shared secret = scalarMult(privateKey, peerPublicKey).
 // This is the per-contact shared key used for message encryption.
 func SharedSecret(private, peerPublic *[32]byte) [32]byte {
-	return box.Precompute(peerPublic, private)
+	var shared [32]byte
+	box.Precompute(&shared, peerPublic, private)
+	return shared
 }
 
 // NonceSize is the size of a NaCl secretbox nonce (24 bytes).
