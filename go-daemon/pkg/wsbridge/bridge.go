@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/crypto"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/mesh"
 )
@@ -51,13 +52,14 @@ var upgrader = websocket.Upgrader{
 // Bridge provides a WebSocket server that bridges the Ripple mesh network
 // to connected Flutter app clients.
 type Bridge struct {
-	node     *mesh.Node
-	peerID   string
-	nickname string
-	addr     string
+	node       *mesh.Node
+	peerID     string
+	nickname   string
+	addr       string
+	e2eManager *crypto.Manager
 
-	clients   map[*Client]bool
-	clientsMu sync.RWMutex
+	clients     map[*Client]bool
+	clientsMu   sync.RWMutex
 
 	peerNicknames   map[peer.ID]string
 	peerNicknamesMu sync.RWMutex
@@ -111,19 +113,20 @@ type wsIncoming struct {
 //
 // The bridge is bound to the given mesh node and will relay messages between
 // the mesh and WebSocket clients. The peerID and nickname identify the local
-// node to connecting clients. The bridge starts in the stopped state; call
-// Start() to begin accepting connections.
-func NewBridge(node *mesh.Node, peerID, nickname string, port int) *Bridge {
+// node to connecting clients. The e2eManager handles E2E encryption.
+// The bridge starts in the stopped state; call Start() to begin accepting connections.
+func NewBridge(node *mesh.Node, peerID, nickname string, port int, e2eManager *crypto.Manager) *Bridge {
 	addr := fmt.Sprintf(":%d", port)
 	return &Bridge{
-		node:          node,
-		peerID:        peerID,
-		nickname:      nickname,
-		addr:          addr,
-		clients:       make(map[*Client]bool),
+		node:        node,
+		peerID:      peerID,
+		nickname:    nickname,
+		addr:        addr,
+		e2eManager:  e2eManager,
+		clients:     make(map[*Client]bool),
 		peerNicknames: make(map[peer.ID]string),
-		log:           log.New(log.Writer(), "[wsbridge] ", log.LstdFlags),
-		closeCh:       make(chan struct{}),
+		log:         log.New(log.Writer(), "[wsbridge] ", log.LstdFlags),
+		closeCh:     make(chan struct{}),
 	}
 }
 
@@ -292,8 +295,8 @@ func (b *Bridge) broadcast(data []byte) {
 }
 
 // handleMeshMessage is called when the mesh node receives a message.
-// It caches the sender's nickname and forwards the message to all
-// WebSocket clients. File-type messages get special structured formatting.
+// It decrypts E2E encrypted messages, caches the sender's nickname,
+// and forwards the message to all WebSocket clients.
 func (b *Bridge) handleMeshMessage(msg *message.Message) {
 	// Cache sender nickname for peer display purposes
 	if msg.Sender != "" {
@@ -305,6 +308,16 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 		}
 	}
 
+	// Try to decrypt if this is an E2E encrypted message
+	encrypted := msg.IsEncrypted()
+	if encrypted && b.e2eManager != nil {
+		if err := b.e2eManager.DecryptMessage(msg); err != nil {
+			b.log.Printf("⚠️  Failed to decrypt E2E message from %s: %v", msg.Sender, err)
+			// Don't forward undecryptable messages
+			return
+		}
+	}
+
 	// File-type messages use structured file event format
 	if msg.Type == message.TypeFile {
 		b.BroadcastFileNotification(msg)
@@ -312,9 +325,23 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 	}
 
 	// Default: serialize the mesh message and broadcast to all WS clients.
+	// Add encrypted flag so Flutter can show the padlock icon.
 	data, err := msg.Serialize()
 	if err != nil {
 		b.log.Printf("message serialize error: %v", err)
+		return
+	}
+
+	var wsMsg map[string]interface{}
+	if err := json.Unmarshal(data, &wsMsg); err != nil {
+		b.log.Printf("message unmarshal error: %v", err)
+		return
+	}
+	wsMsg["encrypted"] = encrypted
+
+	data, err = json.Marshal(wsMsg)
+	if err != nil {
+		b.log.Printf("message marshal error: %v", err)
 		return
 	}
 	b.broadcast(data)
@@ -541,7 +568,7 @@ func (c *Client) handleIncoming(data []byte) {
 }
 
 // handleIncomingChat processes a chat message from a WebSocket client and
-// forwards it into the mesh network.
+// forwards it into the mesh network. Encrypts if we have the recipient's key.
 func (c *Client) handleIncomingChat(incoming wsIncoming) {
 	// Use the provided ID and timestamp, but set sender from the local node
 	// to prevent spoofing. The Flutter app should send the local peer ID,
@@ -567,6 +594,14 @@ func (c *Client) handleIncomingChat(incoming wsIncoming) {
 	// but we create the struct directly so validate it's non-empty
 	if msg.ID == "" {
 		msg = message.NewChat(c.bridge.peerID, c.bridge.nickname, incoming.Recipient, incoming.Payload)
+	}
+
+	// Try to encrypt if we have E2E manager and recipient's public key
+	if c.bridge.e2eManager != nil && incoming.Recipient != "" {
+		if err := c.bridge.e2eManager.EncryptMessage(msg); err != nil {
+			// Log but don't fail - fall back to unencrypted
+			c.bridge.log.Printf("⚠️  E2E encrypt failed for %s, sending unencrypted: %v", incoming.Recipient, err)
+		}
 	}
 
 	if err := c.bridge.node.SendMessage(msg); err != nil {

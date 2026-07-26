@@ -18,12 +18,57 @@ import (
 type MessageType string
 
 const (
-	TypeChat       MessageType = "chat"        // Simple text chat message
-	TypeFile       MessageType = "file"        // File transfer (Phase 1+)
-	TypeSOS        MessageType = "sos"         // Emergency broadcast
-	TypeDeliveryAck MessageType = "delivery_ack" // Delivery confirmation
-	TypePeerInfo   MessageType = "peer_info"   // Peer metadata exchange
+	TypeChat         MessageType = "chat"         // Simple text chat message
+	TypeFile         MessageType = "file"         // File transfer (Phase 1+)
+	TypeSOS          MessageType = "sos"          // Emergency broadcast
+	TypeDeliveryAck  MessageType = "delivery_ack" // Delivery confirmation
+	TypePeerInfo     MessageType = "peer_info"    // Peer metadata exchange
 )
+
+// DeliveryStatus represents the state of a message delivery.
+type DeliveryStatus string
+
+const (
+	DeliverySent      DeliveryStatus = "sent"       // Message published to mesh
+	DeliveryReceived  DeliveryStatus = "received"   // Recipient's node received it
+	DeliveryDelivered DeliveryStatus = "delivered"  // Recipient's app displayed it
+	DeliveryRead      DeliveryStatus = "read"       // Recipient opened/read it
+	DeliveryFailed    DeliveryStatus = "failed"     // Could not deliver
+)
+
+// DeliveryInfo is the payload for delivery-related messages.
+type DeliveryInfo struct {
+	MessageID      string         `json:"msg_id"`
+	Status         DeliveryStatus `json:"status"`
+	RecipientPeer  string         `json:"recipient_peer"`
+	OriginalSender string         `json:"original_sender"`
+	Timestamp      int64          `json:"ts"`
+	HopCount       int            `json:"hops"`
+	Error          string         `json:"error,omitempty"`
+}
+
+// SOSUrgency represents the urgency level of an SOS alert.
+type SOSUrgency string
+
+const (
+	SOSUrgencyLow      SOSUrgency = "low"
+	SOSUrgencyMedium   SOSUrgency = "medium"
+	SOSUrgencyHigh     SOSUrgency = "high"    // default
+	SOSUrgencyCritical SOSUrgency = "critical"
+)
+
+// SOSPayload is the structured payload for SOS messages.
+// This gets JSON-serialized into Message.Payload.
+type SOSPayload struct {
+	Urgency     SOSUrgency `json:"urgency"`
+	Message     string     `json:"message"`
+	Latitude    float64    `json:"lat,omitempty"`
+	Longitude   float64    `json:"lon,omitempty"`
+	Accuracy    float64    `json:"accuracy,omitempty"` // meters
+	Timestamp   int64      `json:"ts"`
+	AutoExpire  int        `json:"expire_minutes"` // minutes until auto-expire (default 60)
+	AckRequired bool       `json:"ack_required"`  // true = sender needs delivery confirmation
+}
 
 // Message is the universal envelope for all Ripple mesh messages.
 type Message struct {
@@ -54,6 +99,14 @@ type Message struct {
 
 	// HopCount tracks how many relays this message has passed through.
 	HopCount int `json:"hops"`
+
+	// Nonce is the NaCl encryption nonce (for E2E encrypted messages).
+	// Empty when the message is not encrypted.
+	Nonce string `json:"nonce,omitempty"`
+
+	// KeyID identifies which public key was used to encrypt.
+	// Format: first 8 hex chars of sender's Curve25519 public key.
+	KeyID string `json:"key_id,omitempty"`
 }
 
 // NewChat creates a new chat message from sender to recipient.
@@ -72,16 +125,34 @@ func NewChat(sender, senderNick, recipient, text string) *Message {
 	}
 }
 
-// NewDeliveryAck creates a delivery acknowledgment.
-func NewDeliveryAck(sender, ackForID string) *Message {
-	return &Message{
-		ID:        newID(),
-		Type:      TypeDeliveryAck,
-		Sender:    sender,
-		Payload:   ackForID,
-		Timestamp: time.Now().UnixNano(),
-		TTL:       4,
+// NewDeliveryAck creates a delivery acknowledgment message.
+// The payload carries a DeliveryInfo JSON structure.
+func NewDeliveryAck(sender, ackForID, recipient string, status DeliveryStatus, hopCount int, errMsg string) *Message {
+	info := DeliveryInfo{
+		MessageID:      ackForID,
+		Status:         status,
+		RecipientPeer:  recipient,
+		OriginalSender: sender,
+		Timestamp:      time.Now().UnixNano(),
+		HopCount:       hopCount,
+		Error:          errMsg,
 	}
+	payloadBytes, _ := json.Marshal(info)
+	return &Message{
+		ID:         newID(),
+		Type:       TypeDeliveryAck,
+		Sender:     sender,
+		Payload:    string(payloadBytes),
+		Timestamp:  time.Now().UnixNano(),
+		TTL:        4, // Delivery acks use shorter TTL
+		HopCount:   0,
+	}
+}
+
+// NewDeliveryStatus creates a message to notify the sender about delivery status.
+// Used when recipient receives/displays/reads a message.
+func NewDeliveryStatus(sender, recipient, originalMsgID string, status DeliveryStatus) *Message {
+	return NewDeliveryAck(sender, originalMsgID, recipient, status, 0, "")
 }
 
 // Serialize encodes the message as JSON bytes.
@@ -190,6 +261,45 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// NewSOS creates a new SOS broadcast message with high TTL.
+func NewSOS(sender, senderNick, message string, urgency SOSUrgency,
+	lat, lon float64, accuracy float64) *Message {
+	payload := SOSPayload{
+		Urgency:     urgency,
+		Message:     message,
+		Latitude:    lat,
+		Longitude:   lon,
+		Accuracy:    accuracy,
+		Timestamp:   time.Now().UnixMilli(),
+		AutoExpire:  60, // default 60 minutes
+		AckRequired: true,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	return &Message{
+		ID:         newID(),
+		Type:       TypeSOS,
+		Sender:     sender,
+		SenderNick: senderNick,
+		Recipient:  "", // broadcast
+		Payload:    string(payloadBytes),
+		Timestamp:  time.Now().UnixNano(),
+		TTL:        64, // High TTL for SOS propagation
+		HopCount:   0,
+	}
+}
+
+// ParseSOSPayload extracts the SOSPayload from a message.
+func ParseSOSPayload(msg *Message) (*SOSPayload, error) {
+	if msg.Type != TypeSOS {
+		return nil, fmt.Errorf("message is not an SOS type")
+	}
+	var payload SOSPayload
+	if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+		return nil, fmt.Errorf("parse SOS payload: %w", err)
+	}
+	return &payload, nil
+}
+
 // IsExpired returns true if the message TTL has reached zero.
 func (m *Message) IsExpired() bool {
 	return m.TTL <= 0
@@ -201,4 +311,9 @@ func (m *Message) DecrementTTL() {
 		m.TTL--
 	}
 	m.HopCount++
+}
+
+// IsEncrypted returns true if the message payload is E2E encrypted.
+func (m *Message) IsEncrypted() bool {
+	return m.Nonce != ""
 }

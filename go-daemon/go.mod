@@ -8,4 +8,5 @@ require (
 	github.com/libp2p/go-libp2p-pubsub v0.12.0
 	github.com/multiformats/go-multiaddr v0.13.0
 	modernc.org/sqlite v1.26.0
+	golang.org/x/crypto v0.28.0
 )
