@@ -1,0 +1,100 @@
+# Ripple 3-Node Mesh Test Environment
+# =====================================
+# Spin up three Ripple daemon nodes on the same Docker network.
+# They auto-discover each other via mDNS and form a mesh.
+#
+# Usage:
+#   docker compose up
+#   # Or in detached mode:
+#   docker compose up -d
+#   # Check logs:
+#   docker compose logs -f
+#
+# To interact with a node via WebSocket:
+#   # Install websocat or use any WebSocket client:
+#   # node1: ws://localhost:9001/ws
+#   # node2: ws://localhost:9002/ws
+#   # node3: ws://localhost:9003/ws
+
+services:
+  ripple-node1:
+    build:
+      context: ./go-daemon
+      dockerfile: Dockerfile
+    container_name: ripple-node1
+    hostname: ripple-node1
+    ports:
+      - "9001:9000"    # libp2p TCP
+      - "9871:9876"    # WebSocket bridge
+    volumes:
+      - ripple-data-1:/data
+    command: [
+      "rippled",
+      "-port", "9000",
+      "-wsport", "9876",
+      "-nick", "node1",
+      "-data", "/data",
+      "-db", "/data/ripple.db",
+      "-debug"
+    ]
+    networks:
+      - ripple-mesh
+
+  ripple-node2:
+    build:
+      context: ./go-daemon
+      dockerfile: Dockerfile
+    container_name: ripple-node2
+    hostname: ripple-node2
+    ports:
+      - "9002:9000"
+      - "9872:9876"
+    volumes:
+      - ripple-data-2:/data
+    command: [
+      "rippled",
+      "-port", "9000",
+      "-wsport", "9876",
+      "-nick", "node2",
+      "-data", "/data",
+      "-db", "/data/ripple.db",
+      "-debug"
+    ]
+    networks:
+      - ripple-mesh
+    depends_on:
+      - ripple-node1
+
+  ripple-node3:
+    build:
+      context: ./go-daemon
+      dockerfile: Dockerfile
+    container_name: ripple-node3
+    hostname: ripple-node3
+    ports:
+      - "9003:9000"
+      - "9873:9876"
+    volumes:
+      - ripple-data-3:/data
+    command: [
+      "rippled",
+      "-port", "9000",
+      "-wsport", "9876",
+      "-nick", "node3",
+      "-data", "/data",
+      "-db", "/data/ripple.db",
+      "-debug"
+    ]
+    networks:
+      - ripple-mesh
+    depends_on:
+      - ripple-node1
+
+networks:
+  ripple-mesh:
+    driver: bridge
+
+volumes:
+  ripple-data-1:
+  ripple-data-2:
+  ripple-data-3:

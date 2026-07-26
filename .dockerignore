@@ -1,0 +1,34 @@
+# Go
+go-daemon/rippled
+go-daemon/rippled.exe
+go-daemon/vendor/
+go-daemon/go.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+.ripple/
+
+# Build
+flutter-app/build/
+flutter-app/.dart_tool/
+flutter-app/.packages
+flutter-app/pubspec.lock
+
+# Git
+.git/
+.gitignore
+
+# CI
+.github/
+
+# Docker
+docker-compose.yml
