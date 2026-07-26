@@ -549,8 +549,4 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ============================================================
-// Placeholder screens — replace with real imports
-// ============================================================
-
 
