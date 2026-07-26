@@ -27,6 +27,7 @@ import (
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/mesh"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/store"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/wsbridge"
 )
 
 const (
@@ -126,7 +127,18 @@ func main() {
 	for _, addr := range n.AddrList() {
 		fmt.Printf("   📍 %s\n", addr)
 	}
-	fmt.Printf("\n✅ Ripple is running! Type /help for commands.\n\n")
+	fmt.Println()
+
+	// Start WebSocket bridge for Flutter app connectivity
+	bridge := wsbridge.NewBridge(n, id.PeerID.String(), nickname, cfg.WSPort)
+	if err := bridge.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ WebSocket bridge error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🔌 WebSocket bridge: ws://localhost:%d/ws\n", cfg.WSPort)
+	fmt.Println()
+
+	fmt.Printf("✅ Ripple is running! Type /help for commands.\n\n")
 
 	// Handle shutdown signals
 	sigCh := make(chan os.Signal, 1)
