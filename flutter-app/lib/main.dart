@@ -22,9 +22,7 @@ import 'screens/chat_list_screen.dart';
 import 'screens/chat_detail_screen.dart';
 import 'screens/contacts_screen.dart';
 import 'screens/qr_screen.dart';
-
-// Screens still under construction (inlined below):
-//   import 'screens/mesh_map_screen.dart';
+import 'screens/mesh_map_screen.dart';
 
 // ============================================================
 // App-theme notifier (persisted via SharedPreferences)
@@ -555,35 +553,4 @@ class _HomeScreenState extends State<HomeScreen> {
 // Placeholder screens — replace with real imports
 // ============================================================
 
-/// Mesh map — visualisation of the mesh network topology.
-///
-/// TODO: Replace with real import when screens/mesh_map_screen.dart is created.
-class MeshMapScreen extends StatelessWidget {
-  const MeshMapScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.hub_outline, size: 64, color: colorScheme.primary.withOpacity(0.4)),
-          const SizedBox(height: 16),
-          Text(
-            'Mesh Map',
-            style: theme.textTheme.titleLarge?.copyWith(color: colorScheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Coming soon',
-            style: theme.textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant.withOpacity(0.6)),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
