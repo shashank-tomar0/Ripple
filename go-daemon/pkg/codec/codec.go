@@ -44,7 +44,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"strings"
 
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
@@ -81,16 +80,14 @@ var shortToType = map[byte]message.MessageType{
 
 const maxShortLen = 15
 
-// wireFlags bitmask.
+// wireFlags bitmask (lower 4 bits only; upper 4 bits = type short-code).
 const (
 	flagHasNick     byte = 1 << iota // sender_nick present
 	flagHasRecipient                 // recipient present
 	flagHasNonce                     // nonce present
 	flagHasKeyID                     // key_id present
-	flagHasPayload                   // payload present
-	_                                // reserved
-	_                                // reserved
-	typeLong                         // type is long-form (if set in first nibble)
+	// Note: payload is ALWAYS encoded (1 byte for empty = length 0).
+	// No flag needed.
 )
 
 // ── Varint helpers ───────────────────────────────────────────────
@@ -179,25 +176,19 @@ func Marshal(msg *message.Message) ([]byte, error) {
 	if msg.KeyID != "" {
 		flags |= flagHasKeyID
 	}
-	if msg.Payload != "" {
-		flags |= flagHasPayload
-	}
+	// Note: payload is ALWAYS encoded (even empty strings as 1-byte length 0)
 
 	// ── Type byte ──
-	typeCode, short := typeToShort[string(msg.Type)]
+	typeCode, short := typeToShort[msg.Type]
 	if short && len(msg.Type) <= maxShortLen {
-		flags |= typeCode // store short code in upper nibble (well, flags byte holds it)
-		// Actually: flags byte upper nibble = short type, lower nibble = bool flags
-		// Rebuild: [type_short(4 bits) | bool_flags(4 bits)]
 		flags = (typeCode << 4) | (flags & 0x0F)
 	} else {
-		// Long form: type follows as string
 		flags = (typeShortLongForm << 4) | (flags & 0x0F)
 	}
 	buf = append(buf, flags)
 
 	// ── Type (long form only) ──
-	if typeCode, ok := typeToShort[string(msg.Type)]; !ok || typeCode == typeShortLongForm {
+	if _, ok := typeToShort[msg.Type]; !ok {
 		buf = append(buf, putString(string(msg.Type))...)
 	}
 
@@ -325,14 +316,13 @@ func Unmarshal(data []byte) (*message.Message, error) {
 	}
 
 	// ── Payload ──
-	if boolFlags&flagHasPayload != 0 {
+		// Payload is always encoded (empty string = 1-byte length 0)
 		s, n, err = getString(data[off:])
 		if err != nil {
 			return nil, fmt.Errorf("codec: payload: %w", err)
 		}
 		msg.Payload = s
 		off += n
-	}
 
 	// ── Timestamp (varint zigzag) ──
 	ts, n := binary.Uvarint(data[off:])
