@@ -1,0 +1,31 @@
+name: ripple
+description: Ripple — Offline mesh messenger. No internet needed.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.0.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  provider: ^6.1.1
+  web_socket_channel: ^2.4.0
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^3.5.5
+  shared_preferences: ^2.2.2
+  intl: ^0.19.0
+  permission_handler: ^11.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: RobotoMono
+      fonts:
+        - asset: fonts/RobotoMono-Regular.ttf
