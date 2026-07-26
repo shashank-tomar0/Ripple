@@ -1,0 +1,26 @@
+# Go
+go-daemon/ripple
+go-daemon/ripple.exe
+go-daemon/vendor/
+
+# Dependencies
+go-daemon/go.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+.ripple/
+
+# Build
+flutter-app/build/
+flutter-app/.dart_tool/
+flutter-app/.packages
+flutter-app/pubspec.lock
