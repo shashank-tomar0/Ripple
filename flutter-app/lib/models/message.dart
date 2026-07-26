@@ -37,6 +37,7 @@ class Message {
         timestamp: json['ts'] as int? ?? DateTime.now().millisecondsSinceEpoch,
         ttl: json['ttl'] as int? ?? 16,
         hopCount: json['hops'] as int? ?? 0,
+        isSent: json['is_sent'] as bool? ?? false,
       );
 
   Map<String, dynamic> toJson() => {
@@ -49,6 +50,7 @@ class Message {
         'ts': timestamp,
         'ttl': ttl,
         'hops': hopCount,
+        if (isSent) 'is_sent': true,
       };
 
   DateTime get dateTime =>

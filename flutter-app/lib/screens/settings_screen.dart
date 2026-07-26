@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/local_storage_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -286,11 +287,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(context).colorScheme.error,
             ),
-            onPressed: () {
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('🧹 All data cleared')),
-              );
+            onPressed: () async {
+              await LocalStorageService.clearAll();
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('🧹 All data cleared')),
+                );
+              }
             },
             child: const Text('Delete Everything'),
           ),

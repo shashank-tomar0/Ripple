@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
+import '../models/file_transfer.dart';
 
 /// Callback types for daemon events.
 typedef MessageCallback = void Function(Message message);
@@ -35,6 +36,7 @@ abstract class DaemonService {
   Future<List<Message>> getMessages(String peerId);
 
   Stream<Message> get onMessage;
+  Stream<FileTransfer> get onFileTransfer;
   Stream<Contact> get onPeerJoined;
   Stream<Contact> get onPeerLeft;
   Stream<bool> get onConnectionState;
@@ -48,6 +50,7 @@ class WebSocketDaemonService extends DaemonService {
   String _nick = '';
 
   final _messageController = StreamController<Message>.broadcast();
+  final _fileTransferController = StreamController<FileTransfer>.broadcast();
   final _peerJoinController = StreamController<Contact>.broadcast();
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
@@ -60,6 +63,9 @@ class WebSocketDaemonService extends DaemonService {
 
   @override
   String get nickname => _nick;
+
+  @override
+  Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
 
   @override
   Future<bool> connect({String host = 'localhost', int port = 9876}) async {
@@ -121,6 +127,12 @@ class WebSocketDaemonService extends DaemonService {
       case 'sos':
         _messageController.add(Message.fromJson(json));
         break;
+      case 'file_meta':
+      case 'file_progress':
+      case 'file_complete':
+      case 'file_error':
+        _fileTransferController.add(FileTransfer.fromJson(json));
+        break;
       case 'peer_join':
         _peerJoinController.add(Contact.fromJson(json['peer'] as Map<String, dynamic>));
         break;
@@ -168,6 +180,7 @@ class WebSocketDaemonService extends DaemonService {
 class LocalDaemonService extends DaemonService {
   bool _connected = false;
   final _messageController = StreamController<Message>.broadcast();
+  final _fileTransferController = StreamController<FileTransfer>.broadcast();
   final _peerJoinController = StreamController<Contact>.broadcast();
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
@@ -189,6 +202,9 @@ class LocalDaemonService extends DaemonService {
 
   @override
   String get nickname => 'You';
+
+  @override
+  Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
 
   @override
   Future<bool> connect({String host = 'localhost', int port = 9876}) async {
@@ -213,6 +229,11 @@ class LocalDaemonService extends DaemonService {
     message.isSent = true;
     _messageController.add(message);
 
+    // Simulate file transfer progress if this is a file message
+    if (message.isFile && message.recipient != null) {
+      _simulateFileTransfer(message);
+    }
+
     // Simulate a reply after 1-2 seconds
     if (message.recipient != null) {
       Future.delayed(Duration(seconds: 1 + _rand.nextInt(2)), () {
@@ -235,6 +256,49 @@ class LocalDaemonService extends DaemonService {
       });
     }
     return true;
+  }
+
+  void _simulateFileTransfer(Message message) {
+    String fileName;
+    int fileSize;
+    String mimeType;
+    try {
+      final meta = jsonDecode(message.payload);
+      fileName = meta['file_name'] as String? ?? 'unknown_file.bin';
+      fileSize = meta['file_size'] as int? ?? 1048576;
+      mimeType = meta['mime_type'] as String? ?? 'application/octet-stream';
+    } catch (_) {
+      fileName = message.payload;
+      fileSize = 1048576;
+      mimeType = 'application/octet-stream';
+    }
+
+    final ft = FileTransfer(
+      fileId: message.id,
+      fileName: fileName,
+      fileSize: fileSize,
+      mimeType: mimeType,
+      sender: message.sender,
+      senderNick: message.senderNick,
+      recipient: message.recipient,
+      timestamp: message.timestamp,
+      status: FileTransferStatus.sending,
+      isIncoming: false,
+    );
+    _fileTransferController.add(ft);
+
+    // Simulate progress updates
+    final steps = 5;
+    for (var i = 1; i <= steps; i++) {
+      Future.delayed(Duration(milliseconds: 300 * i), () {
+        final progress = i / steps;
+        ft.status = i < steps
+            ? FileTransferStatus.sending
+            : FileTransferStatus.complete;
+        ft.progress = progress;
+        _fileTransferController.add(ft);
+      });
+    }
   }
 
   String _randomReply() {

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/config"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/filetransfer"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/identity"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/mesh"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
@@ -85,8 +86,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create message store
-	msgStore = store.New()
+	// Create message store (in-memory or SQLite-backed)
+	if cfg.DBPath != "" {
+		var err error
+		msgStore, err = store.NewWithDB(cfg.DBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Could not open message database: %v\n", err)
+			fmt.Println("   Falling back to in-memory store")
+			msgStore = store.New()
+		} else {
+			fmt.Printf("🗄️  Message store: %s\n", cfg.DBPath)
+		}
+	} else {
+		msgStore = store.New()
+	}
 
 	// Create mesh node
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,6 +151,15 @@ func main() {
 	fmt.Printf("🔌 WebSocket bridge: ws://localhost:%d/ws\n", cfg.WSPort)
 	fmt.Println()
 
+	// Start file transfer manager
+	ftManager := filetransfer.NewManager(n.Host, cfg.DataDir)
+	ftManager.OnFileNotification = func(msg *message.Message) {
+		bridge.BroadcastFileNotification(msg)
+	}
+	ftManager.Start(ctx)
+	fmt.Printf("📁 File transfer manager ready (chunk size: %dKB)\n", filetransfer.DefaultChunkSize/1024)
+	fmt.Println()
+
 	fmt.Printf("✅ Ripple is running! Type /help for commands.\n\n")
 
 	// Handle shutdown signals
@@ -151,6 +173,9 @@ func main() {
 	<-sigCh
 	fmt.Println("\n\n👋 Shutting down Ripple...")
 	n.Close()
+	if msgStore != nil {
+		msgStore.Close()
+	}
 	fmt.Println("Goodbye!")
 }
 

@@ -101,6 +101,88 @@ func DeserializeMessage(data []byte) (*Message, error) {
 	return &msg, nil
 }
 
+// FileMessagePayload is the payload for file transfer metadata messages.
+// This gets JSON-serialized into Message.Payload.
+type FileMessagePayload struct {
+	FileID     string  `json:"file_id"`
+	FileName   string  `json:"filename"`
+	FileSize   int64   `json:"file_size"`
+	MimeType   string  `json:"mime_type"`
+	ChunkCount int     `json:"chunk_count"`
+	ChunkIdx   int     `json:"chunk_idx,omitempty"`
+	ChunkSize  int     `json:"chunk_size,omitempty"`
+	Status     string  `json:"status,omitempty"` // started | progress | complete | failed
+	Progress   float64 `json:"progress,omitempty"`
+	OutputPath string  `json:"output_path,omitempty"`
+}
+
+// NewFileMetadata creates a file transfer metadata message.
+func NewFileMetadata(sender, senderNick, recipient, fileName, mimeType string, fileSize int64, chunkCount int) *Message {
+	payload := FileMessagePayload{
+		FileID:     newID(),
+		FileName:   fileName,
+		FileSize:   fileSize,
+		MimeType:   mimeType,
+		ChunkCount: chunkCount,
+		Status:     "started",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	return &Message{
+		ID:         newID(),
+		Type:       TypeFile,
+		Sender:     sender,
+		SenderNick: senderNick,
+		Recipient:  recipient,
+		Payload:    string(payloadBytes),
+		Timestamp:  time.Now().UnixNano(),
+		TTL:        16,
+		HopCount:   0,
+	}
+}
+
+// NewFileProgress creates a file transfer progress notification message.
+func NewFileProgress(sender, recipient, fileID string, chunkIdx, chunkCount int, progress float64) *Message {
+	payload := FileMessagePayload{
+		FileID:     fileID,
+		ChunkIdx:   chunkIdx,
+		ChunkCount: chunkCount,
+		Status:     "progress",
+		Progress:   progress,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	return &Message{
+		ID:        newID(),
+		Type:      TypeFile,
+		Sender:    sender,
+		Recipient: recipient,
+		Payload:   string(payloadBytes),
+		Timestamp: time.Now().UnixNano(),
+		TTL:       4,
+		HopCount:  0,
+	}
+}
+
+// NewFileComplete creates a file transfer completion notification message.
+func NewFileComplete(sender, recipient, fileID, fileName, outputPath string) *Message {
+	payload := FileMessagePayload{
+		FileID:     fileID,
+		FileName:   fileName,
+		Status:     "complete",
+		OutputPath: outputPath,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	return &Message{
+		ID:        newID(),
+		Type:      TypeFile,
+		Sender:    sender,
+		Recipient: recipient,
+		Payload:   string(payloadBytes),
+		Timestamp: time.Now().UnixNano(),
+		TTL:       4,
+		HopCount:  0,
+	}
+}
+
 // newID generates a random hex string for message identification.
 func newID() string {
 	b := make([]byte, 16)

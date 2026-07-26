@@ -1,13 +1,16 @@
 // Package screens contains all Ripple UI screens.
 library;
 
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 
 import '../services/app_state.dart';
+import '../services/file_picker_service.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
+import '../models/file_transfer.dart';
 
 /// Chat detail screen — displays messages with a single peer and provides
 /// a text input bar for sending new messages.
@@ -26,6 +29,7 @@ class ChatDetailScreen extends StatefulWidget {
 class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final FilePickerService _filePicker = LocalFilePickerService();
   bool _isSending = false;
   int _lastMessageLength = 0;
 
@@ -74,6 +78,88 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Failed to send message')),
       );
+    }
+  }
+
+  /// Shows the attachment options bottom sheet.
+  void _showAttachmentSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 32,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.3),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 12),
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined),
+              title: const Text('Camera'),
+              subtitle: const Text('Take a photo'),
+              onTap: () {
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Camera coming soon')),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Gallery'),
+              subtitle: const Text('Choose from your photos'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndSendFile(context, isImage: true);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file_outlined),
+              title: const Text('File'),
+              subtitle: const Text('Send any file type'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndSendFile(context, isImage: false);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Picks a file (or image) and sends it as a file message.
+  Future<void> _pickAndSendFile(BuildContext context, {required bool isImage}) async {
+    final result = isImage
+        ? await _filePicker.pickImage()
+        : await _filePicker.pickFile();
+
+    if (!mounted || result == null) return;
+
+    final appState = context.read<AppState>();
+    final ft = await appState.sendFile(
+      fileName: result.name,
+      fileSize: result.size,
+      mimeType: result.mimeType,
+      filePath: result.path,
+      recipient: widget.peerId,
+    );
+
+    if (!mounted) return;
+
+    if (ft == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to send file')),
+      );
+    } else {
+      _scrollToBottom();
     }
   }
 
@@ -137,7 +223,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     itemCount: messages.length,
                     itemBuilder: (context, index) {
                       final message = messages[index];
-                      return _MessageBubble(message: message);
+                      final transfer = message.isFile
+                          ? appState.fileTransferForId(message.id)
+                          : null;
+                      return _MessageBubble(
+                        message: message,
+                        transfer: transfer,
+                      );
                     },
                   ),
           ),
@@ -178,13 +270,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
-  /// Bottom input bar with text field and send button.
+  /// Bottom input bar with attachment button, text field, and send button.
   Widget _buildInputBar(ThemeData theme, ColorScheme colorScheme) {
     final hasText = _textController.text.trim().isNotEmpty;
 
     return Container(
       padding: EdgeInsets.only(
-        left: 12,
+        left: 4,
         right: 8,
         top: 10,
         bottom: MediaQuery.of(context).padding.bottom + 10,
@@ -198,12 +290,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          IconButton(
+            icon: const Icon(Icons.attach_file_outlined),
+            tooltip: 'Attach file',
+            iconSize: 22,
+            color: colorScheme.onSurfaceVariant,
+            onPressed: () => _showAttachmentSheet(context),
+            style: IconButton.styleFrom(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+          const SizedBox(width: 2),
           Expanded(
             child: TextField(
               controller: _textController,
               textCapitalization: TextCapitalization.sentences,
               decoration: InputDecoration(
-                hintText: 'Type a message…',
+                hintText: 'Type a message...',
                 filled: true,
                 fillColor: colorScheme.surface,
                 contentPadding: const EdgeInsets.symmetric(
@@ -255,8 +360,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 /// appear left-aligned with a darker surface background.
 class _MessageBubble extends StatelessWidget {
   final Message message;
+  final FileTransfer? transfer;
 
-  const _MessageBubble({required this.message});
+  const _MessageBubble({
+    required this.message,
+    this.transfer,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -281,7 +390,9 @@ class _MessageBubble extends StatelessWidget {
             constraints: BoxConstraints(
               maxWidth: MediaQuery.of(context).size.width * 0.78,
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding: message.isFile
+                ? EdgeInsets.zero
+                : const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: bgColor,
               borderRadius: BorderRadius.only(
@@ -296,7 +407,7 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
             child: message.isFile
-                ? _buildFileContent(timeStr, timeColor)
+                ? _buildFileContent(timeStr, timeColor, textColor)
                 : _buildTextContent(timeStr, textColor, timeColor, isOwn),
           ),
         ],
@@ -340,45 +451,271 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  /// Renders a file message bubble with an icon and filename.
-  Widget _buildFileContent(String timeStr, Color timeColor) {
-    final theme = Theme.of(context);
+  /// Renders a file message bubble with icon, name, size, progress bar, and status.
+  Widget _buildFileContent(String timeStr, Color timeColor, Color textColor) {
     final isOwn = message.isSent;
-    final textColor =
-        isOwn ? theme.colorScheme.onPrimary : theme.colorScheme.onSurface;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          Icons.insert_drive_file_outlined,
-          color: textColor,
-          size: 24,
-        ),
-        const SizedBox(width: 10),
-        Flexible(
-          child: Column(
+    // Parse file metadata from the JSON payload.
+    String fileName;
+    int fileSize;
+    String mimeType;
+    try {
+      final meta = jsonDecode(message.payload);
+      fileName = meta['file_name'] as String? ?? 'Unknown file';
+      fileSize = meta['file_size'] as int? ?? 0;
+      mimeType = meta['mime_type'] as String? ?? '';
+    } catch (_) {
+      fileName = message.payload;
+      fileSize = 0;
+      mimeType = '';
+    }
+
+    // Determine icon based on mime type.
+    IconData icon;
+    Color iconColor;
+    if (mimeType.startsWith('image/')) {
+      icon = Icons.image_outlined;
+      iconColor = Colors.amber;
+    } else if (mimeType.startsWith('audio/')) {
+      icon = Icons.audiotrack_outlined;
+      iconColor = Colors.orange;
+    } else if (mimeType.startsWith('video/')) {
+      icon = Icons.videocam_outlined;
+      iconColor = Colors.redAccent;
+    } else {
+      icon = Icons.insert_drive_file_outlined;
+      iconColor = isOwn ? colorScheme.onPrimary : colorScheme.primary;
+    }
+
+    final transferStatus = transfer?.status;
+    final progress = transfer?.progress ?? (message.isSent ? 1.0 : 0.0);
+    final isTransferActive = transferStatus == FileTransferStatus.sending ||
+        transferStatus == FileTransferStatus.receiving;
+
+    // Determine action icon for incoming files.
+    final Widget? actionIcon = message.isIncoming
+        ? _buildDownloadIcon(colorScheme)
+        : null;
+
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Top row: icon + file info
+          Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                message.payload,
-                style: TextStyle(
-                  color: textColor,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: isOwn
+                      ? colorScheme.onPrimary.withOpacity(0.12)
+                      : colorScheme.primary.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+                child: Icon(icon, color: iconColor, size: 22),
               ),
-              const SizedBox(height: 2),
-              Text(
-                timeStr,
-                style: TextStyle(fontSize: 11, color: timeColor),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      fileName,
+                      style: TextStyle(
+                        color: textColor,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Text(
+                          _formatFileSize(fileSize),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: timeColor,
+                          ),
+                        ),
+                        if (transferStatus != null) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            _statusLabel(transferStatus),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: _statusColor(transferStatus, colorScheme),
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
               ),
+              if (actionIcon != null) actionIcon,
             ],
           ),
-        ),
-      ],
+
+          // Progress bar for active transfers
+          if (isTransferActive) ...[
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 6,
+                backgroundColor: isOwn
+                    ? colorScheme.onPrimary.withOpacity(0.2)
+                    : colorScheme.primary.withOpacity(0.15),
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  isOwn ? colorScheme.onPrimary : colorScheme.primary,
+                ),
+              ),
+            ),
+          ],
+
+          // Status checkmark for complete
+          if (transferStatus == FileTransferStatus.complete && message.isSent) ...[
+            const SizedBox(height: 6),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.check_circle,
+                  size: 14,
+                  color: isOwn ? colorScheme.onPrimary : colorScheme.primary,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  'Sent',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: timeColor,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // Error display
+          if (transferStatus == FileTransferStatus.failed) ...[
+            const SizedBox(height: 6),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.error_outline,
+                  size: 14,
+                  color: colorScheme.error,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  transfer?.error ?? 'Transfer failed',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: colorScheme.error,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // Timestamp
+          const SizedBox(height: 6),
+          Text(
+            timeStr,
+            style: TextStyle(fontSize: 11, color: timeColor),
+          ),
+        ],
+      ),
     );
+  }
+
+  /// Builds a download icon button for received files.
+  Widget _buildDownloadIcon(ColorScheme colorScheme) {
+    final isComplete = transfer?.status == FileTransferStatus.complete;
+    final isFailed = transfer?.status == FileTransferStatus.failed;
+
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: isComplete
+            ? Colors.green.withOpacity(0.15)
+            : isFailed
+                ? colorScheme.error.withOpacity(0.15)
+                : colorScheme.primary.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Icon(
+        isComplete
+            ? Icons.check_circle
+            : isFailed
+                ? Icons.refresh
+                : Icons.download_outlined,
+        size: 20,
+        color: isComplete
+            ? Colors.green
+            : isFailed
+                ? colorScheme.error
+                : colorScheme.primary,
+      ),
+    );
+  }
+
+  /// Formats bytes into a human-readable file size string.
+  String _formatFileSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
+  /// Returns a short label for the transfer status.
+  String _statusLabel(FileTransferStatus status) {
+    switch (status) {
+      case FileTransferStatus.pending:
+        return 'Pending';
+      case FileTransferStatus.sending:
+        return 'Sending...';
+      case FileTransferStatus.receiving:
+        return 'Receiving...';
+      case FileTransferStatus.complete:
+        return 'Complete';
+      case FileTransferStatus.failed:
+        return 'Failed';
+      case FileTransferStatus.cancelled:
+        return 'Cancelled';
+    }
+  }
+
+  /// Returns a color for the transfer status label.
+  Color _statusColor(FileTransferStatus status, ColorScheme colorScheme) {
+    switch (status) {
+      case FileTransferStatus.sending:
+      case FileTransferStatus.receiving:
+        return colorScheme.primary;
+      case FileTransferStatus.complete:
+        return Colors.green;
+      case FileTransferStatus.failed:
+        return colorScheme.error;
+      case FileTransferStatus.cancelled:
+        return colorScheme.onSurfaceVariant;
+      case FileTransferStatus.pending:
+        return colorScheme.onSurfaceVariant;
+    }
   }
 }

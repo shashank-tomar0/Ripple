@@ -293,7 +293,7 @@ func (b *Bridge) broadcast(data []byte) {
 
 // handleMeshMessage is called when the mesh node receives a message.
 // It caches the sender's nickname and forwards the message to all
-// WebSocket clients.
+// WebSocket clients. File-type messages get special structured formatting.
 func (b *Bridge) handleMeshMessage(msg *message.Message) {
 	// Cache sender nickname for peer display purposes
 	if msg.Sender != "" {
@@ -305,12 +305,72 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 		}
 	}
 
-	// Serialize the mesh message and broadcast to all WS clients.
-	// The message.Message struct already has the correct JSON field layout
-	// that matches the Flutter client's expectations.
+	// File-type messages use structured file event format
+	if msg.Type == message.TypeFile {
+		b.BroadcastFileNotification(msg)
+		return
+	}
+
+	// Default: serialize the mesh message and broadcast to all WS clients.
 	data, err := msg.Serialize()
 	if err != nil {
 		b.log.Printf("message serialize error: %v", err)
+		return
+	}
+	b.broadcast(data)
+}
+
+// BroadcastFileNotification parses a file-type message's payload and broadcasts
+// a structured file event to all connected WebSocket clients.
+//
+// WS message format varies by status:
+//
+//	started:  { type:"file", file_id, filename, file_size, mime_type, chunk_count, status:"started", sender, sender_nick, ts }
+//	progress: { type:"file", file_id, status:"progress", progress, chunk_idx, chunk_size }
+//	complete: { type:"file", file_id, status:"complete", filename, output_path }
+func (b *Bridge) BroadcastFileNotification(msg *message.Message) {
+	var fpayload message.FileMessagePayload
+	if err := json.Unmarshal([]byte(msg.Payload), &fpayload); err != nil {
+		b.log.Printf("file notification parse error: %v", err)
+		return
+	}
+
+	// Build the file event, adding extra fields per status
+	event := map[string]interface{}{
+		"type":    "file",
+		"file_id": fpayload.FileID,
+		"status":  fpayload.Status,
+	}
+
+	switch fpayload.Status {
+	case "started":
+		event["filename"] = fpayload.FileName
+		event["file_size"] = fpayload.FileSize
+		event["mime_type"] = fpayload.MimeType
+		event["chunk_count"] = fpayload.ChunkCount
+		event["sender"] = msg.Sender
+		event["sender_nick"] = msg.SenderNick
+		event["ts"] = msg.Timestamp
+
+	case "progress":
+		event["progress"] = fpayload.Progress
+		event["chunk_idx"] = fpayload.ChunkIdx
+		event["chunk_size"] = fpayload.ChunkSize
+
+	case "complete":
+		event["filename"] = fpayload.FileName
+		if fpayload.OutputPath != "" {
+			event["output_path"] = fpayload.OutputPath
+		}
+
+	case "failed":
+		event["sender"] = msg.Sender
+		event["sender_nick"] = msg.SenderNick
+	}
+
+	data, err := json.Marshal(event)
+	if err != nil {
+		b.log.Printf("file event marshal error: %v", err)
 		return
 	}
 	b.broadcast(data)

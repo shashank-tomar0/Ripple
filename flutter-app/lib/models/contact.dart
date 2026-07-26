@@ -1,6 +1,8 @@
 // Package models defines the Ripple application models.
 library;
 
+import 'dart:convert';
+
 class Contact {
   final String peerId;
   final String nickname;
@@ -58,6 +60,17 @@ class Conversation {
 
   String get subtitle {
     if (lastMessage == null) return 'No messages yet';
+    if (lastMessage!.isFile) {
+      try {
+        final meta = jsonDecode(lastMessage!.payload);
+        final name = meta['file_name'] as String? ?? 'File';
+        return lastMessage!.isSent ? 'You: $name' : name;
+      } catch (_) {
+        return lastMessage!.isSent
+            ? 'You: ${lastMessage!.payload}'
+            : lastMessage!.payload;
+      }
+    }
     final preview = lastMessage!.payload.length > 40
         ? '${lastMessage!.payload.substring(0, 40)}…'
         : lastMessage!.payload;
