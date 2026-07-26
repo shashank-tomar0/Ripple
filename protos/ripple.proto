@@ -2,35 +2,52 @@ syntax = "proto3";
 
 package ripple;
 
-option go_package = "github.com/shashank-tomar0/Ripple/protos";
+option go_package = "github.com/shashank-tomar0/Ripple/protos/ripplepb";
 
-// RippleMessage is the envelope for all mesh messages.
+// ──────────────────────────────────────────────────────────────
+// RippleMessage — envelope for all mesh messages.
+// This is the primary wire format for libp2p pubsub & streams.
+// ──────────────────────────────────────────────────────────────
 message RippleMessage {
   string id = 1;
-  string type = 2;           // chat, file, sos, delivery_ack, peer_info, key_exchange
+  string type = 2;           // chat | file | sos | delivery_ack | peer_info | key_exchange
   string sender = 3;
   string sender_nick = 4;
   string recipient = 5;      // empty = broadcast
-  bytes payload = 6;         // JSON or encrypted payload
+  bytes payload = 6;         // inner Protobuf message (Any-like, typed by 'type' field)
   int64 timestamp = 7;       // Unix nanoseconds
   int32 ttl = 8;
   int32 hop_count = 9;
-  string nonce = 10;         // E2E encryption nonce (if encrypted)
-  string key_id = 11;        // first 8 chars of sender's Curve25519 pubkey
+  string nonce = 10;         // E2E nonce (if encrypted)
+  string key_id = 11;        // first 8 hex chars of sender's Curve25519 pubkey
 }
 
-// FileMetadata for file transfer announcements.
+// ──────────────────────────────────────────────────────────────
+// Inner payload types (serialized into RippleMessage.payload)
+// ──────────────────────────────────────────────────────────────
+
+// ChatContent — text chat message.
+message ChatContent {
+  string text = 1;
+}
+
+// FileMetadata — file transfer announcement.
 message FileMetadata {
   string file_id = 1;
   string filename = 2;
   int64 file_size = 3;
   string mime_type = 4;
   int32 chunk_count = 5;
+  int32 chunk_idx = 6;        // set for progress updates
+  int32 chunk_size = 7;       // set for progress updates
+  string status = 8;          // started | progress | complete | failed
+  double progress = 9;        // 0.0 – 1.0
+  string output_path = 10;    // set on completion
 }
 
-// SOSPayload for emergency alerts.
+// SOSPayload — emergency alert.
 message SOSPayload {
-  string urgency = 1;
+  string urgency = 1;         // low | medium | high | critical
   string message = 2;
   double latitude = 3;
   double longitude = 4;
@@ -38,4 +55,52 @@ message SOSPayload {
   int64 timestamp = 6;
   int32 expire_minutes = 7;
   bool ack_required = 8;
+}
+
+// DeliveryInfo — acknowledgment & receipt chain.
+message DeliveryInfo {
+  string msg_id = 1;
+  string status = 2;          // sent | received | delivered | read | failed
+  string recipient_peer = 3;
+  string original_sender = 4;
+  int64 timestamp = 5;
+  int32 hop_count = 6;
+  string error = 7;
+}
+
+// KeyExchangePayload — E2E key exchange handshake.
+message KeyExchangePayload {
+  string public_key = 1;      // hex-encoded Curve25519 public key
+  string nickname = 2;
+  int64 timestamp = 3;
+}
+
+// PeerInfo — metadata exchanged on first contact.
+message PeerInfo {
+  string nickname = 1;
+  string public_key = 2;      // Curve25519 public key hex
+  string app_version = 3;
+  repeated string transports = 4;  // "tcp", "ble", "wifi-direct"
+}
+
+// ──────────────────────────────────────────────────────────────
+// ChunkPayload — individual file chunk (sent over direct stream)
+// ──────────────────────────────────────────────────────────────
+message ChunkPayload {
+  string file_id = 1;
+  int32 chunk_idx = 2;
+  int32 chunk_count = 3;
+  bytes data = 4;
+  int32 size = 5;
+}
+
+// ──────────────────────────────────────────────────────────────
+// WirePacket — single-frame envelope for BLE / serial transports
+// where MTU is small. Combines envelope + payload in one shot.
+// ──────────────────────────────────────────────────────────────
+message WirePacket {
+  oneof kind {
+    RippleMessage message = 1;
+    ChunkPayload chunk = 2;
+  }
 }

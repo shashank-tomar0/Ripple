@@ -172,6 +172,8 @@ class Message {
   int hopCount;
   bool isSent;
   final bool encrypted;
+  final String nonce;
+  final String keyId;
 
   /// Delivery status for sent messages (sending -> sent -> delivered -> read)
   DeliveryStatus _status = DeliveryStatus.sent;
@@ -196,6 +198,8 @@ class Message {
     this.hopCount = 0,
     this.isSent = false,
     this.encrypted = false,
+    this.nonce = '',
+    this.keyId = '',
   });
 
   factory Message.fromJson(Map<String, dynamic> json) => Message(
@@ -210,6 +214,8 @@ class Message {
         hopCount: json['hops'] as int? ?? 0,
         isSent: json['is_sent'] as bool? ?? false,
         encrypted: json['encrypted'] as bool? ?? false,
+        nonce: json['nonce'] as String? ?? '',
+        keyId: json['key_id'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {
@@ -224,6 +230,8 @@ class Message {
         'hops': hopCount,
         if (isSent) 'is_sent': true,
         if (encrypted) 'encrypted': true,
+        if (nonce.isNotEmpty) 'nonce': nonce,
+        if (keyId.isNotEmpty) 'key_id': keyId,
       };
 
   DateTime get dateTime =>
