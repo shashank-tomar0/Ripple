@@ -6,7 +6,6 @@
 package identity
 
 import (
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
 	"errors"

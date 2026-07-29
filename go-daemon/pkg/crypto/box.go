@@ -297,6 +297,9 @@ func (m *Manager) GetPeerKey(peerID string) (*[32]byte, bool) {
 
 // MyPublicKeyHex returns our public key as hex string (for QR display).
 func (m *Manager) MyPublicKeyHex() string {
+	if m.Keypair == nil {
+		return ""
+	}
 	return m.Keypair.PublicKeyHex()
 }
 
@@ -417,10 +420,62 @@ func (m *Manager) ShouldSendKeyExchange(peerID string) bool {
 	return !has
 }
 
-// MyPublicKeyHex returns this peer's Curve25519 public key as hex.
-func (m *Manager) MyPublicKeyHex() string {
-	if m.Keypair == nil {
-		return ""
+// EncryptMessage encrypts the payload of a message for its recipient.
+// Sets the Nonce and KeyID fields for decryption on the recipient side.
+func (m *Manager) EncryptMessage(msg *message.Message) error {
+	if msg.Recipient == "" {
+		// Broadcast messages are not E2E encrypted
+		return nil
 	}
-	return m.Keypair.PublicKeyHex()
+
+	sharedKey, err := m.GetSharedKey(msg.Recipient)
+	if err != nil {
+		return err
+	}
+
+	encryptedPayload, err := Encrypt([]byte(msg.Payload), sharedKey)
+	if err != nil {
+		return fmt.Errorf("encrypt payload: %w", err)
+	}
+
+	msg.Payload = encryptedPayload
+	msg.Nonce = encryptedPayload[:48] // First 48 hex chars = 24-byte nonce
+	msg.KeyID = m.MyKeyID()
+
+	return nil
+}
+
+// DecryptMessage decrypts the payload of a received message.
+func (m *Manager) DecryptMessage(msg *message.Message) error {
+	if !msg.IsEncrypted() {
+		return ErrNotEncrypted
+	}
+
+	if msg.Sender == "" {
+		return errors.New("encrypted message missing sender")
+	}
+
+	sharedKey, err := m.GetSharedKey(msg.Sender)
+	if err != nil {
+		// Try to derive if we have the peer's key but not cached
+		if pub, ok := m.GetPeerKey(msg.Sender); ok {
+			shared := SharedSecret(&m.Keypair.PrivateKey, pub)
+			m.mu.Lock()
+			m.sharedCache[msg.Sender] = &shared
+			m.mu.Unlock()
+			sharedKey = &shared
+		} else {
+			return fmt.Errorf("no shared key for sender %s: %w", msg.Sender, ErrNoSharedKey)
+		}
+	}
+
+	plaintext, err := Decrypt(msg.Payload, sharedKey)
+	if err != nil {
+		return fmt.Errorf("decrypt payload: %w", err)
+	}
+
+	msg.Payload = string(plaintext)
+	msg.Nonce = ""
+	msg.KeyID = ""
+	return nil
 }
