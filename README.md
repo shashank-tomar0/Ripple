@@ -63,23 +63,110 @@ Once both are running on the same WiFi network, mDNS automatically discovers pee
 
 ## 🏗️ Architecture
 
+### System Architecture
+
+```mermaid
+graph TB
+    subgraph Mobile["📱 Flutter App"]
+        UI["Flutter UI<br/>Chat · Contacts · Mesh Map<br/>QR · SOS · Settings"]
+        DaemonService["DaemonService<br/>WebSocket Client"]
+        BLE["BLE Transport<br/>flutter_blue_plus"]
+        Foreground["Android Foreground Service<br/>Kotlin"]
+    end
+
+    subgraph Backend["⚙️ Go Daemon (rippled)"]
+        WS["wsbridge<br/>WebSocket Server :9876"]
+        Mesh["mesh<br/>libp2p Networking"]
+        Crypto["crypto<br/>NaCl Curve25519 E2E"]
+        Store["store<br/>SQLite Persistence"]
+        FileXfer["filetransfer<br/>Chunked File Streams"]
+        SOS["sos<br/>Emergency Broadcast"]
+        Delivery["delivery<br/>Receipt Tracking"]
+        Codec["codec<br/>Binary Wire Format"]
+        Identity["identity<br/>Ed25519 Keypair"]
+    end
+
+    subgraph Network["🌐 Mesh Network"]
+        TCP["TCP Transport<br/>libp2p :9000"]
+        MDNS["mDNS Discovery<br/>224.0.0.251:5353"]
+        Gossip["GossipSub PubSub<br/>ripple-mesh-v1"]
+    end
+
+    subgraph Peers["🔗 Other Peers"]
+        P1["Peer: Bob"]
+        P2["Peer: Carol"]
+        P3["Peer: Dave"]
+    end
+
+    UI <--> DaemonService
+    DaemonService <-->|"WebSocket :9876"| WS
+    Foreground ---|"starts/stops"| Backend
+    BLE ---|"scans/advertises"| Peers
+
+    WS --> Mesh
+    Mesh --> Crypto
+    Mesh --> Store
+    Mesh --> FileXfer
+    Mesh --> SOS
+    Mesh --> Delivery
+    Mesh --> Codec
+    Mesh --> Identity
+
+    Mesh <--> TCP
+    Mesh <--> MDNS
+    Mesh <--> Gossip
+    TCP & Gossip <--> Peers
+
+    style Mobile fill:#1a1a2e,color:#fff
+    style Backend fill:#16213e,color:#fff
+    style Network fill:#0f3460,color:#fff
+    style Peers fill:#533483,color:#fff
 ```
-┌──────────────┐    WebSocket :9876    ┌─────────────────┐
-│  Flutter App │◄─────────────────────►│   Go Daemon     │
-│              │    JSON messages      │                 │
-│  Chat UI     │                       │  libp2p Mesh    │
-│  Contacts    │                       │  ├─ TCP         │
-│  Mesh Map    │                       │  ├─ mDNS        │
-│  QR Scanner  │                       │  ├─ GossipSub   │
-│  File UI     │                       │  └─ Direct Str  │
-│  SOS Alert   │                       │                 │
-│  Settings    │                       │  File Transfer  │
-└──────────────┘                       │  SOS Broadcast  │
-                                       │  Delivery Recpt │
-                                       │  E2E Encryption │
-                                       │  SQLite Store   │
-                                       │  Ed25519 Ident  │
-                                       └─────────────────┘
+
+### Data Flow — Message Journey (Alice → Bob)
+
+```mermaid
+sequenceDiagram
+    participant FA as Flutter (Alice)
+    participant GA as Go Daemon (Alice)
+    participant Mesh as 🌐 Mesh Network
+    participant GB as Go Daemon (Bob)
+    participant FB as Flutter (Bob)
+
+    Note over FA,FB: Alice sends "Hello!" to Bob (Direct Message)
+
+    FA->>GA: WebSocket JSON: {type:"chat", recipient:"BobID", payload:"Hello!"}
+    GA->>GA: mesh.SendMessage(): Try direct stream first
+    GA->>GB: libp2p direct stream /ripple/chat/1.0.0
+    Note over GA,GB: 1-5ms, private, encrypted
+    GA-->>Mesh: Fallback: GossipSub publish (if direct fails)
+    Mesh-->>GB: Forward via TTL=16, dedup, store-and-forward
+    GB->>GB: deliverMessage(): dedup → decrypt → OnMessage
+    GB->>FB: WebSocket JSON: {type:"chat", sender:"AliceID", payload:"Hello!"}
+    Note over FB: ChatDetailScreen shows "Hello!" bubble
+```
+
+### Data Flow — File Transfer
+
+```mermaid
+sequenceDiagram
+    participant FA as Flutter (Alice)
+    participant GA as Go Daemon (Alice)
+    participant GB as Go Daemon (Bob)
+    participant FB as Flutter (Bob)
+
+    FA->>GA: Select file: photo.jpg (2MB)
+    GA->>GB: Direct stream: FileMetadata{file_id, name, size, chunks=32}
+    GB-->>FA: Ack received
+    GA-->>FA: Progress: 10% (3/32 chunks)
+    loop Send 64KB chunks
+        GA->>GB: FileChunk{chunk_idx: 0, data: base64...}
+        GA->>GB: FileChunk{chunk_idx: 1, data: base64...}
+        GA-->>FA: Progress: 50% (16/32 chunks)
+        GA->>GB: FileChunk{chunk_idx: 31, data: base64...}
+    end
+    GB->>FB: File received: photo.jpg
+    GA-->>FA: File complete: photo.jpg ✓
 ```
 
 ### Components
@@ -100,26 +187,31 @@ Once both are running on the same WiFi network, mDNS automatically discovers pee
 
 ---
 
-## ✅ Features — Phase 0 & 1 Complete
+## ✅ Features
 
 | Feature | Status | Notes |
 |---|---|---|
-| TCP transport (libp2p) | ✅ | NAT traversal, auto-dial |
-| Ed25519 identity | ✅ | Persistent keypair on first launch |
-| mDNS discovery | ✅ | Zero-config LAN peer finding |
-| GossipSub pubsub | ✅ | Mesh broadcast with TTL |
+| TCP transport (libp2p) | ✅ | NAT traversal, auto-dial, connection manager |
+| Ed25519 identity | ✅ | Persistent PEM keypair on first launch |
+| mDNS discovery | ✅ | Zero-config LAN peer finding on 224.0.0.251:5353 |
+| GossipSub pubsub | ✅ | Mesh broadcast with mesh-scored peer selection |
 | Direct P2P streams | ✅ | 1:1 messages, file chunks, key exchange |
-| Store-and-forward | ✅ | Relay via intermediate peers |
-| Terminal chat UI | ✅ | Full CLI with commands |
-| **Flutter Chat UI** | ✅ | Bubbles, timestamps, status icons |
-| **SQLite persistence** | ✅ | Messages, contacts, receipts, files |
-| **E2E encryption (NaCl)** | ✅ | Curve25519, per-session keys |
-| **QR contact exchange** | ✅ | Encode/decode peer identity |
-| **Mesh routing map** | ✅ | Real-time graph visualization |
-| **File chunking + resume** | ✅ | 1 MB chunks, pause/resume |
-| **SOS broadcast** | ✅ | High-priority emergency alerts |
-| **Delivery receipts** | ✅ | ✓ sent, ✓✓ delivered, ✓✓ read |
-| **Background service** | ✅ | Android foreground service |
+| Store-and-forward relay | ✅ | TTL-controlled, dedup-protected |
+| Terminal chat UI | ✅ | Full CLI with 10+ commands |
+| **Flutter Chat UI** | ✅ | Bubble UI, timestamps, checkmark progression |
+| **SQLite persistence** (WAL) | ✅ | Messages, contacts, receipts survive restarts |
+| **E2E encryption (NaCl box)** | ✅ | Curve25519 + XSalsa20-Poly1305, per-contact keys |
+| **QR contact exchange** | ✅ | `ripple://` URI with pubkey, scan to connect |
+| **Mesh routing map** | ✅ | CustomPainter viz, concentric rings, hop count |
+| **File chunking + progress** | ✅ | 64KB chunks, NDJSON streams, progress bars |
+| **SOS emergency broadcast** | ✅ | TTL=64, 30s re-broadcast, GPS location, 10min expiry |
+| **Delivery receipts** | ✅ | ⏳ sending → ✓ sent → ✓✓ delivered → ✓✓✓ read |
+| **Binary wire codec** | ✅ | ~75% smaller than JSON, BLE MTU-aware (20B frames) |
+| **BLE transport** | ✅ | Advertising/scanning, GATT send/receive |
+| **Android foreground service** | ✅ | Persistent mesh relay when app is backgrounded |
+| **GitHub Actions CI** | ✅ | Go build+vet+test, Flutter analyze+build, Docker integration |
+| **Docker compose test** | ✅ | 3-node mesh (alice/bob/carol) for integration testing |
+| **Unit tests** | ✅ | Crypto roundtrip, message serialization, store CRUD, codec |
 
 ---
 
