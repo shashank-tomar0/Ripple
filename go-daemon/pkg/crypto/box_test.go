@@ -3,6 +3,8 @@ package crypto
 import (
 	"testing"
 	"encoding/hex"
+
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 )
 
 func TestGenerateKeypair(t *testing.T) {
@@ -287,7 +289,7 @@ func TestManagerGetSharedKey(t *testing.T) {
 
 	alice, _ := GenerateKeypair()
 	bob, _ := GenerateKeypair()
-	m.Keypair = &alice
+	m.Keypair = alice
 	m.ImportKeyFromHex("bob", bob.PublicKeyHex())
 
 	shared, err := m.GetSharedKey("bob")
@@ -344,11 +346,11 @@ func TestHandleKeyExchangeMessage(t *testing.T) {
 	}
 
 	alice, _ := GenerateKeypair()
-	m.Keypair = &alice
+	m.Keypair = alice
 
 	// Create a key exchange message from Bob
 	bob, _ := GenerateKeypair()
-	msg := NewKeyExchange("bob_id", "Bob", bob.PublicKeyHex())
+	msg := message.NewKeyExchange("bob_id", "Bob", bob.PublicKeyHex())
 
 	// Handle the key exchange
 	err := m.HandleKeyExchangeMessage(msg)

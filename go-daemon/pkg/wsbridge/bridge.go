@@ -201,10 +201,10 @@ func (b *Bridge) Stop() {
 	// Close all clients
 	b.clientsMu.Lock()
 	for client := range b.clients {
+		delete(b.clients, client)
 		close(client.send)
 		client.conn.Close()
 	}
-	b.clients = make(map[*Client]bool)
 	b.clientsMu.Unlock()
 
 	// Shutdown HTTP server
@@ -591,6 +591,18 @@ func (b *Bridge) handleKeyExchange(msg *message.Message) {
 }
 
 // --- Client I/O ---
+
+// unregisterClient removes a client from the bridge and closes its send
+// channel. Safe to call multiple times: only the caller that removed the
+// client from the map closes the channel, so it is never closed twice.
+func (b *Bridge) unregisterClient(client *Client) {
+	b.clientsMu.Lock()
+	defer b.clientsMu.Unlock()
+	if _, ok := b.clients[client]; ok {
+		delete(b.clients, client)
+		close(client.send)
+	}
+}
 
 // readPump reads messages from the WebSocket connection and forwards them
 // to the mesh network. It runs in its own goroutine per client.

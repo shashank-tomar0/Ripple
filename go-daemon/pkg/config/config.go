@@ -38,7 +38,7 @@ type Config struct {
 	// Nickname is a human-readable display name.
 	Nickname string
 
-	// DBPath is the path to the SQLite database file for message persistence.
+	// DBPath is the base path for persistent message storage (JSON backup file).
 	// If empty, the store runs in pure in-memory mode (no persistence across restarts).
 	DBPath string
 
@@ -54,7 +54,7 @@ func Parse() *Config {
 	flag.IntVar(&c.WSPort, "wsport", DefaultWSPort, "WebSocket bridge port")
 	flag.StringVar(&c.Rendezvous, "rdv", DefaultRendezvous, "Rendezvous string for peer discovery")
 	flag.StringVar(&c.Nickname, "nick", "", "Display nickname")
-	flag.StringVar(&c.DBPath, "db", "", "SQLite database path (default: ~/.ripple/ripple.db)")
+	flag.StringVar(&c.DBPath, "db", "", "Persistent store path (JSON backup; default: ~/.ripple/ripple.db)")
 	flag.BoolVar(&c.Debug, "debug", false, "Enable debug logging")
 
 	var dataDir string
@@ -77,7 +77,7 @@ func Parse() *Config {
 	c.DataDir = dataDir
 	c.IdentityPath = filepath.Join(dataDir, "identity.pem")
 
-	// Default SQLite database path inside the data directory
+	// Default persistence path inside the data directory
 	if c.DBPath == "" {
 		c.DBPath = filepath.Join(dataDir, "ripple.db")
 	}

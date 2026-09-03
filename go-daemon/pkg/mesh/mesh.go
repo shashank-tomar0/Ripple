@@ -14,7 +14,6 @@ package mesh
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -85,7 +84,7 @@ type Node struct {
 
 	// Logging
 	Debug bool
-	log   *log.Logger
+	Log   *log.Logger
 }
 
 // Option configures a Node.
@@ -123,7 +122,7 @@ func NewNode(ctx context.Context, privKey crypto.PrivKey, listenPort int, opts .
 		PeerID:  pid,
 		peers:   make(map[peer.ID]bool),
 		seen:    make(map[string]bool),
-		log:     log.Default(),
+		Log:     log.Default(),
 	}
 
 	for _, opt := range opts {
@@ -158,9 +157,9 @@ func NewNode(ctx context.Context, privKey crypto.PrivKey, listenPort int, opts .
 	h.SetStreamHandler(ProtocolID, n.handleStream)
 
 	if n.Debug {
-		n.log.Printf("🔗 libp2p host: %s", h.ID())
+		n.Log.Printf("🔗 libp2p host: %s", h.ID())
 		for _, addr := range h.Addrs() {
-			n.log.Printf("   listen: %s/p2p/%s", addr, h.ID())
+			n.Log.Printf("   listen: %s/p2p/%s", addr, h.ID())
 		}
 	}
 
@@ -200,7 +199,7 @@ func (n *Node) Start() error {
 	n.startMDNS()
 
 	if n.Debug {
-		n.log.Printf("📡 PubSub topic: %s", PubSubTopic)
+		n.Log.Printf("📡 PubSub topic: %s", PubSubTopic)
 	}
 
 	// Start periodic dedup cache cleanup
@@ -224,7 +223,7 @@ func (n *Node) StartSeenCleanup(ctx context.Context) {
 				n.seen = make(map[string]bool)
 				n.seenLock.Unlock()
 				if n.Debug {
-					n.log.Printf("pruned dedup cache")
+					n.Log.Printf("pruned dedup cache")
 				}
 			case <-ctx.Done():
 				return
@@ -237,7 +236,7 @@ func (n *Node) StartSeenCleanup(ctx context.Context) {
 func (n *Node) Close() {
 	n.cancel()
 	if err := n.Host.Close(); err != nil {
-		n.log.Printf("error closing host: %v", err)
+		n.Log.Printf("error closing host: %v", err)
 	}
 }
 
@@ -255,7 +254,7 @@ func (n *Node) SendMessage(msg *message.Message) error {
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		n.log.Printf("📤 sending message %s (type: %s, to: %q)", shortID, msg.Type, msg.Recipient)
+		n.Log.Printf("📤 sending message %s (type: %s, to: %q)", shortID, msg.Type, msg.Recipient)
 	}
 
 	// If we have a specific recipient, try direct stream first
@@ -267,7 +266,7 @@ func (n *Node) SendMessage(msg *message.Message) error {
 				return nil // Sent directly
 			}
 			if n.Debug {
-				n.log.Printf("direct send failed, falling back to pubsub: %v", err)
+				n.Log.Printf("direct send failed, falling back to pubsub: %v", err)
 			}
 		}
 	}
@@ -308,7 +307,7 @@ func (n *Node) sendDirect(pid peer.ID, data []byte) error {
 func (n *Node) handleStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
 	if n.Debug {
-		n.log.Printf("📩 incoming stream from %s", pid.ShortString())
+		n.Log.Printf("📩 incoming stream from %s", pid.ShortString())
 	}
 
 	n.addPeer(pid)
@@ -321,7 +320,7 @@ func (n *Node) handleStream(s network.Stream) {
 	data, err := io.ReadAll(s)
 	if err != nil {
 		if n.Debug {
-			n.log.Printf("stream read error from %s: %v", pid.ShortString(), err)
+			n.Log.Printf("stream read error from %s: %v", pid.ShortString(), err)
 		}
 		return
 	}
@@ -329,7 +328,7 @@ func (n *Node) handleStream(s network.Stream) {
 	msg, err := message.DeserializeMessage(data)
 	if err != nil {
 		if n.Debug {
-			n.log.Printf("invalid message from %s: %v", pid.ShortString(), err)
+			n.Log.Printf("invalid message from %s: %v", pid.ShortString(), err)
 		}
 		return
 	}
@@ -343,7 +342,7 @@ func (n *Node) handlePubSub(sub *pubsub.Subscription) {
 		pbMsg, err := sub.Next(n.ctx)
 		if err != nil {
 			if n.ctx.Err() == nil {
-				n.log.Printf("pubsub error: %v", err)
+				n.Log.Printf("pubsub error: %v", err)
 			}
 			return
 		}
@@ -354,7 +353,7 @@ func (n *Node) handlePubSub(sub *pubsub.Subscription) {
 		msg, err := message.DeserializeMessage(pbMsg.Data)
 		if err != nil {
 			if n.Debug {
-				n.log.Printf("invalid pubsub message from %s: %v", relayPeer, err)
+				n.Log.Printf("invalid pubsub message from %s: %v", relayPeer, err)
 			}
 			continue
 		}
@@ -368,7 +367,7 @@ func (n *Node) handlePubSub(sub *pubsub.Subscription) {
 			if len(shortSender) > 8 {
 				shortSender = shortSender[:8]
 			}
-			n.log.Printf("📨 pubsub message %s from %s via %s (hops: %d)",
+			n.Log.Printf("📨 pubsub message %s from %s via %s (hops: %d)",
 				shortID, shortSender, relayPeer, msg.HopCount)
 		}
 
@@ -399,7 +398,7 @@ func (n *Node) deliverMessage(msg *message.Message) {
 		go func() {
 			data, _ := msg.Serialize()
 			if err := n.Topic.Publish(n.ctx, data); err != nil && n.Debug {
-				n.log.Printf("relay error: %v", err)
+				n.Log.Printf("relay error: %v", err)
 			}
 		}()
 	}
@@ -414,8 +413,8 @@ func (n *Node) deliverMessage(msg *message.Message) {
 	if msg.Recipient == n.Host.ID().String() && msg.Sender != n.Host.ID().String() {
 		// Don't auto-ack our own messages
 		if msg.Type == message.TypeChat || msg.Type == message.TypeFile || msg.Type == message.TypeSOS {
-			// Send "received" ack immediately
-			ack := message.NewDeliveryAck(n.Host.ID().String(), msg.ID, message.DeliveryReceived)
+			// Send "received" ack immediately, addressed back to the original sender
+			ack := message.NewDeliveryAck(n.Host.ID().String(), msg.ID, msg.Sender, message.DeliveryReceived, 0, "")
 			// Use a short TTL for acks (high priority, short distance)
 			ack.TTL = 8
 			_ = n.SendMessage(ack)
@@ -443,7 +442,7 @@ func (n *Node) addPeer(pid peer.ID) {
 	if !n.peers[pid] {
 		n.peers[pid] = true
 		if n.Debug {
-			n.log.Printf("➕ peer connected: %s", pid.ShortString())
+			n.Log.Printf("➕ peer connected: %s", pid.ShortString())
 		}
 		if n.OnPeerJoin != nil {
 			n.OnPeerJoin(pid)
@@ -458,7 +457,7 @@ func (n *Node) removePeer(pid peer.ID) {
 
 	delete(n.peers, pid)
 	if n.Debug {
-		n.log.Printf("➖ peer disconnected: %s", pid.ShortString())
+		n.Log.Printf("➖ peer disconnected: %s", pid.ShortString())
 	}
 	if n.OnPeerLeave != nil {
 		n.OnPeerLeave(pid)
@@ -476,7 +475,7 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 		return // Skip self
 	}
 	if n.Node.Debug {
-		n.Node.log.Printf("🔍 discovered peer via mDNS: %s", pi.ID.ShortString())
+		n.Node.Log.Printf("🔍 discovered peer via mDNS: %s", pi.ID.ShortString())
 	}
 	n.Node.addPeer(pi.ID)
 
@@ -487,13 +486,13 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 
 		if err := n.Node.Host.Connect(ctx, pi); err != nil {
 			if n.Node.Debug {
-				n.Node.log.Printf("connect to discovered peer %s: %v", pi.ID.ShortString(), err)
+				n.Node.Log.Printf("connect to discovered peer %s: %v", pi.ID.ShortString(), err)
 			}
 			return
 		}
 
 		if n.Node.Debug {
-			n.Node.log.Printf("✅ connected to %s", pi.ID.ShortString())
+			n.Node.Log.Printf("✅ connected to %s", pi.ID.ShortString())
 		}
 	}()
 }
@@ -502,11 +501,11 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 func (n *Node) startMDNS() {
 	service := mdns.NewMdnsService(n.Host, ServiceName, &discoveryNotifee{Node: n})
 	if err := service.Start(); err != nil {
-		n.log.Printf("mDNS start error: %v", err)
+		n.Log.Printf("mDNS start error: %v", err)
 		return
 	}
 	if n.Debug {
-		n.log.Printf("🔍 mDNS discovery started on %s", ServiceName)
+		n.Log.Printf("🔍 mDNS discovery started on %s", ServiceName)
 	}
 }
 
@@ -518,9 +517,13 @@ func (n *Node) ConnectToPeer(addrStr string) error {
 	}
 
 	// Extract peer ID from the multiaddress
-	pid, err := peer.Decode(maddr.ValueForProtocol(multiaddr.P_P2P))
+	pidStr, err := maddr.ValueForProtocol(multiaddr.P_P2P)
 	if err != nil {
 		return fmt.Errorf("extract peer ID: %w", err)
+	}
+	pid, err := peer.Decode(pidStr)
+	if err != nil {
+		return fmt.Errorf("decode peer ID: %w", err)
 	}
 
 	pi := peer.AddrInfo{

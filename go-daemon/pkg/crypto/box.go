@@ -284,7 +284,7 @@ func (m *Manager) SetPeerKey(peerID string, pubKey [32]byte) error {
 	// Invalidate shared cache for this peer
 	delete(m.sharedCache, peerID)
 
-	return m.SaveKnownKeys()
+	return m.saveKnownKeysLocked()
 }
 
 // GetPeerKey retrieves a peer's stored public key.
@@ -344,7 +344,12 @@ func (m *Manager) LoadKnownKeys() error {
 func (m *Manager) SaveKnownKeys() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.saveKnownKeysLocked()
+}
 
+// saveKnownKeysLocked persists known public keys to disk.
+// The caller must already hold m.mu (read or write).
+func (m *Manager) saveKnownKeysLocked() error {
 	if err := os.MkdirAll(filepath.Dir(m.knownKeysPath), 0700); err != nil {
 		return fmt.Errorf("create keys directory: %w", err)
 	}

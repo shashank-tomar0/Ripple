@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/config"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/crypto"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/filetransfer"
@@ -88,7 +90,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create message store (in-memory or SQLite-backed)
+	// Create message store (in-memory, with optional JSON backup persistence)
 	if cfg.DBPath != "" {
 		var err error
 		msgStore, err = store.NewWithDB(cfg.DBPath)

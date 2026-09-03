@@ -56,9 +56,10 @@ func TestMessagesForContact(t *testing.T) {
 	s.SaveMessage(msg3)
 
 	conv := s.MessagesForContact("bob")
-	// Only msg1 has bob as recipient (msg2 is from bob, msg3 is broadcast)
-	if len(conv) != 1 {
-		t.Errorf("MessagesForContact(bob) = %d, want 1", len(conv))
+	// Messages to or from bob: msg1 (recipient bob) and msg2 (sender bob).
+	// msg3 is a broadcast from carol and does not involve bob.
+	if len(conv) != 2 {
+		t.Errorf("MessagesForContact(bob) = %d, want 2", len(conv))
 	}
 }
 
@@ -151,7 +152,8 @@ func TestMessagesForContactWithDB(t *testing.T) {
 	s.SaveMessage(msg2)
 
 	conv := s.MessagesForContact("bob")
-	if len(conv) != 1 {
-		t.Errorf("MessagesForContact(bob) = %d, want 1", len(conv))
+	// msg1 is to bob, msg2 is from bob — both belong to bob's conversation.
+	if len(conv) != 2 {
+		t.Errorf("MessagesForContact(bob) = %d, want 2", len(conv))
 	}
 }

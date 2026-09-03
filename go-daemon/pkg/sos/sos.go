@@ -189,7 +189,7 @@ func (m *Manager) HandleIncomingSOS(msg *message.Message) error {
 // CancelAlert cancels an active SOS alert.
 func (m *Manager) CancelAlert(alertID string) error {
 	m.mu.Lock()
-	alert, exists := m.alerts[alertID]
+	_, exists := m.alerts[alertID]
 	if exists {
 		delete(m.alerts, alertID)
 	}
