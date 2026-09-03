@@ -460,7 +460,8 @@ class AppState extends ChangeNotifier {
     for (final pid in allPeerIds) {
       final msgs = byPeer[pid] ?? const <Message>[];
       convs.add(Conversation(
-        contact: contactForPeerId(pid) ?? Contact(peerId: pid),
+        contact: contactForPeerId(pid) ??
+            Contact(peerId: pid, nickname: ''), // unknown peer -> short ID shown
         // _messages is newest-first, so the first entry is the latest.
         lastMessage: msgs.isEmpty ? null : msgs.first,
         unreadCount: msgs.where((m) => !m.isSent).length,

@@ -4,6 +4,7 @@
 
 import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -508,7 +509,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const _icons = [
     Icons.chat_bubble_outline,
     Icons.people_outline,
-    Icons.hub_outline,
+    Icons.hub_outlined,
   ];
 
   final List<Widget> _pages = const [
