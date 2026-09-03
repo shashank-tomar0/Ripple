@@ -1,7 +1,10 @@
 # Ripple 3-Node Mesh Test Environment
 # =====================================
 # Spin up three Ripple daemon nodes on the same Docker network.
-# They auto-discover each other via mDNS and form a mesh.
+# Nodes auto-discover each other via mDNS, but note that mDNS multicast is
+# unreliable inside Docker bridge networks — if the mesh does not form, add
+# an explicit `-peers /dns4/<host>/tcp/9000/p2p/<id>` bootstrap to each node
+# (the CI integration test runs the mesh as host processes for this reason).
 #
 # Usage:
 #   docker compose up

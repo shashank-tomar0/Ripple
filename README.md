@@ -55,7 +55,7 @@ Once both are running on the same WiFi network, mDNS automatically discovers pee
 | `--port` | `9000` | TCP listen port for libp2p |
 | `--wsport` | `9876` | WebSocket port for Flutter bridge |
 | `--nick` | `peer` | Display nickname |
-| `--db` | `~/.ripple/messages.db` | SQLite database path |
+| `--db` | `~/.ripple/ripple.db` | Persistent store path (JSON backup) |
 | `--peers` | `` | Comma-separated bootstrap peer multiaddrs |
 | `--debug` | `false` | Enable debug logging |
 
@@ -78,7 +78,7 @@ graph TB
         WS["wsbridge<br/>WebSocket Server :9876"]
         Mesh["mesh<br/>libp2p Networking"]
         Crypto["crypto<br/>NaCl Curve25519 E2E"]
-        Store["store<br/>SQLite Persistence"]
+        Store["store<br/>JSON Persistence"]
         FileXfer["filetransfer<br/>Chunked File Streams"]
         SOS["sos<br/>Emergency Broadcast"]
         Delivery["delivery<br/>Receipt Tracking"]
@@ -180,7 +180,7 @@ sequenceDiagram
 | **Discovery** | mDNS | Zero-config LAN peer discovery |
 | **PubSub** | GossipSub | Flood messages across mesh |
 | **E2E Crypto** | NaCl Curve25519 | Encrypted 1:1 chats, key exchange |
-| **Storage** | SQLite (modernc.org/sqlite) | Message persistence, contacts, receipts |
+| **Storage** | In-memory + JSON backup | Restart persistence (SQLite planned) |
 | **File Transfer** | Chunked streams + resume | Large file support over mesh |
 | **SOS Broadcast** | GossipSub high-priority | Emergency alerts with location |
 | **Delivery Receipts** | Signed acks | Sent / Delivered / Read tracking |
@@ -199,7 +199,8 @@ sequenceDiagram
 | Store-and-forward relay | ✅ | TTL-controlled, dedup-protected |
 | Terminal chat UI | ✅ | Full CLI with 10+ commands |
 | **Flutter Chat UI** | ✅ | Bubble UI, timestamps, checkmark progression |
-| **SQLite persistence** (WAL) | ✅ | Messages, contacts, receipts survive restarts |
+| **Restart persistence** (JSON backup) | ✅ | Messages, contacts, receipts survive restarts |
+| **SQLite persistence** (WAL) | 🔜 | Planned: store will move behind an interface, then a SQLite-backed impl |
 | **E2E encryption (NaCl box)** | ✅ | Curve25519 + XSalsa20-Poly1305, per-contact keys |
 | **QR contact exchange** | ✅ | `ripple://` URI with pubkey, scan to connect |
 | **Mesh routing map** | ✅ | CustomPainter viz, concentric rings, hop count |
@@ -285,7 +286,7 @@ Ripple/
 │       ├── mesh/              # libp2p networking
 │       ├── message/           # Message types, serialization
 │       ├── sos/               # SOS broadcast
-│       ├── store/             # SQLite persistence
+│       ├── store/             # message persistence (JSON backup)
 │       └── wsbridge/          # WebSocket ↔ Flutter bridge
 ├── flutter-app/               # Cross-platform UI
 │   ├── lib/

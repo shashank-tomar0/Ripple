@@ -11,9 +11,11 @@ env:
   FLUTTER_VERSION: '3.22'
 
 jobs:
-  # ── Go Daemon Tests ──
+  # ── Go Daemon (build + vet + tests) ──
+  # These steps must pass: no `|| true` escapes. If the daemon doesn't
+  # build or a test fails, CI goes red.
   go-daemon:
-    name: Go Daemon (build + test)
+    name: Go Daemon (build + vet + test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -37,12 +39,12 @@ jobs:
       - name: Run go build
         run: go build -o rippled ./cmd/rippled
 
-      - name: Run unit tests
-        run: go test -v -race ./... 2>&1 || true  # some packages may have no tests yet
+      - name: Run unit tests (with race detector)
+        run: go test -race ./...
 
-  # ── Flutter App Tests ──
+  # ── Flutter App (analyze + tests) ──
   flutter-app:
-    name: Flutter App (analyze + test)
+    name: Flutter App (analyze + test + build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -64,50 +66,111 @@ jobs:
         run: flutter analyze --no-fatal-infos
 
       - name: Run unit tests
-        run: flutter test 2>&1 || true  # may have no tests yet
+        run: flutter test
 
       - name: Build debug APK (verify compiles)
         run: flutter build apk --debug
 
-  # ── Integration Test: 3-Node Mesh ──
+  # ── Integration Test: real message delivery across a 3-node mesh ──
+  # Three rippled processes run directly on the host (no Docker networking
+  # unknowns). Node 2 and node 3 explicitly bootstrap to node 1's peer ID,
+  # then a chat message is sent through node 1's WebSocket bridge. The test
+  # asserts the payload appears in the logs of BOTH other nodes — i.e. the
+  # message was really delivered through the mesh.
   integration-test:
-    name: Integration Test (3-node mesh)
+    name: Integration Test (3-node mesh delivery)
     needs: [go-daemon, flutter-app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Compose
-        uses: docker/compose-action@v2
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go-daemon/go.sum
+
+      - name: Build rippled
+        working-directory: ./go-daemon
+        run: go build -o rippled ./cmd/rippled
 
       - name: Start 3-node mesh
-        run: docker compose up -d
-        working-directory: .
-
-      - name: Wait for mesh formation
         run: |
-          echo "Waiting for nodes to discover each other..."
-          sleep 15
-          echo "Checking node 1 peers..."
-          curl -s http://localhost:9871/ws || true  # WebSocket endpoint not HTTP, just checking if port is open
-          # Actually check via WebSocket
-          timeout 10s nc -z localhost 9871 && echo "Node 1 WS port open"
-          timeout 10s nc -z localhost 9872 && echo "Node 2 WS port open"
-          timeout 10s nc -z localhost 9873 && echo "Node 3 WS port open"
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+          mkdir -p "$WORK/1" "$WORK/2" "$WORK/3"
 
-      - name: Check container logs for mesh connections
+          ./go-daemon/rippled -port 19401 -wsport 19871 -data "$WORK/1" -nick node1 -debug \
+            > "$WORK/node1.log" 2>&1 &
+          echo "NODE1_PID=$!" >> "$GITHUB_ENV"
+
+          # Wait for node1 to announce its peer ID, then extract it from the
+          # /p2p/ suffix of its announced multiaddresses.
+          for i in $(seq 1 30); do
+            grep -q "Mesh peer ID" "$WORK/node1.log" && break
+            [ "$i" -eq 30 ] && { echo "❌ node1 never started"; tail -30 "$WORK/node1.log"; exit 1; }
+            sleep 1
+          done
+          PEER1=$(grep -oE 'p2p/[0-9A-Za-z]+' "$WORK/node1.log" | head -1 | cut -d/ -f2)
+          echo "node1 peer ID: $PEER1"
+
+          # Nodes 2 and 3 dial node1 explicitly (mDNS alone is unreliable
+          # in CI-like networks, so bootstrapping must be deterministic).
+          ./go-daemon/rippled -port 19402 -wsport 19872 -data "$WORK/2" -nick node2 -debug \
+            -peers "/ip4/127.0.0.1/tcp/19401/p2p/$PEER1" > "$WORK/node2.log" 2>&1 &
+          echo "NODE2_PID=$!" >> "$GITHUB_ENV"
+          ./go-daemon/rippled -port 19403 -wsport 19873 -data "$WORK/3" -nick node3 -debug \
+            -peers "/ip4/127.0.0.1/tcp/19401/p2p/$PEER1" > "$WORK/node3.log" 2>&1 &
+          echo "NODE3_PID=$!" >> "$GITHUB_ENV"
+
+          # Wait until both nodes report the mesh connection.
+          for i in $(seq 1 30); do
+            if grep -q "Peer connected" "$WORK/node2.log" && grep -q "Peer connected" "$WORK/node3.log"; then
+              echo "✅ mesh formed after ${i}s"
+              break
+            fi
+            [ "$i" -eq 30 ] && {
+              echo "❌ mesh did not form"
+              echo "--- node1 log ---"; tail -20 "$WORK/node1.log"
+              echo "--- node2 log ---"; tail -20 "$WORK/node2.log"
+              echo "--- node3 log ---"; tail -20 "$WORK/node3.log"
+              exit 1
+            }
+            sleep 1
+          done
+          # Give GossipSub a moment to graft the topic mesh before sending.
+          sleep 3
+
+      - name: Send message via node 1 and assert delivery to nodes 2 and 3
         run: |
-          echo "=== Node 1 logs ==="
-          docker compose logs --tail=50 ripple-node1 | grep -E "(connected|peer|mesh)" || true
-          echo "=== Node 2 logs ==="
-          docker compose logs --tail=50 ripple-node2 | grep -E "(connected|peer|mesh)" || true
-          echo "=== Node 3 logs ==="
-          docker compose logs --tail=50 ripple-node3 | grep -E "(connected|peer|mesh)" || true
+          set -euo pipefail
+          WORK="$WORK"
+          PAYLOAD="ripple-ci-$(date +%s)"
+          echo "Sending payload: $PAYLOAD"
+
+          cd go-daemon
+          go run ./integration/wsprobe -url ws://localhost:19871/ws -payload "$PAYLOAD" -timeout 5s
+          cd ..
+
+          sleep 3
+          for node in node2 node3; do
+            if grep -q "$PAYLOAD" "$WORK/$node.log"; then
+              echo "✅ message delivered to $node"
+            else
+              echo "❌ message NOT delivered to $node"
+              tail -40 "$WORK/$node.log"
+              exit 1
+            fi
+          done
+          echo "✅ real mesh delivery verified (broadcast from node1 reached node2 and node3)"
 
       - name: Cleanup
         if: always()
-        run: docker compose down -v
+        run: |
+          kill ${NODE1_PID:-} ${NODE2_PID:-} ${NODE3_PID:-} 2>/dev/null || true
 
   # ── Docker Image Build ──
   docker-build:
@@ -123,6 +186,19 @@ jobs:
         run: |
           docker run --rm -d --name test-rippled ripple/rippled:test \
             -port 9000 -wsport 9876 -nick testnode -data /data
-          sleep 5
-          docker logs test-rippled
+          sleep 8
+          RUNNING=$(docker inspect -f '{{.State.Running}}' test-rippled)
+          if [ "$RUNNING" != "true" ]; then
+            echo "❌ container is not running"
+            docker logs test-rippled
+            exit 1
+          fi
+          if docker logs test-rippled | grep -q "Ripple is running"; then
+            echo "✅ daemon started inside container"
+          else
+            echo "❌ daemon did not report a clean startup"
+            docker logs test-rippled
+            docker stop test-rippled
+            exit 1
+          fi
           docker stop test-rippled
