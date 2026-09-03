@@ -88,9 +88,10 @@ void main() {
     test('dateTime converts timestamp correctly', () {
       final msg = Message(
         id: '1', type: 'chat', sender: 'peer', payload: 'hi',
-        timestamp: 1700000000000000, // nanoseconds
+        // Wire ts is Unix nanoseconds: 1700000000000000000 ns ==
+        // 1700000000000 ms == Nov 2023.
+        timestamp: 1700000000000000000,
       );
-      // Should convert to milliseconds
       final dt = msg.dateTime;
       expect(dt.millisecondsSinceEpoch, 1700000000000);
     });

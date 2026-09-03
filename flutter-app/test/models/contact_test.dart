@@ -24,7 +24,7 @@ void main() {
         peerId: '12D3KooW9a',
         nickname: '',
       );
-      expect(contact.displayName, '12D3KooW9a');
+      expect(contact.displayName, '12D3KooW'); // 8-char short ID
     });
 
     test('shortId truncates long peer IDs', () {
@@ -32,7 +32,7 @@ void main() {
         peerId: '12D3KooW9aABCDEF1234567890',
         nickname: 'Alice',
       );
-      expect(contact.shortId, '12D3KooW9a');
+      expect(contact.shortId, '12D3KooW'); // 8-char short ID
     });
 
     test('toJson roundtrips', () {
