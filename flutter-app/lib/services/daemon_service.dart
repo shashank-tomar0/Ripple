@@ -27,7 +27,7 @@ abstract class DaemonService {
   String get nickname;
   String get localPubKey; // hex-encoded Curve25519 public key
 
-  Future<bool> connect({String host = 'localhost', int port = 9876});
+  Future<bool> connect({String? host, int? port});
   Future<void> disconnect();
 
   Future<bool> sendMessage(Message message);
@@ -58,6 +58,17 @@ abstract class DaemonService {
 
 /// WebSocket implementation — connects to the Ripple Go daemon.
 class WebSocketDaemonService extends DaemonService {
+  final String _defaultHost;
+  final int _defaultPort;
+
+  /// [host]/[port] point at the Ripple Go daemon's WebSocket bridge.
+  /// On the Android emulator the host machine is reachable at 10.0.2.2.
+  WebSocketDaemonService({
+    String host = 'localhost',
+    int port = 9876,
+  })  : _defaultHost = host,
+        _defaultPort = port;
+
   WebSocketChannel? _channel;
   bool _connected = false;
   String _peerId = '';
@@ -94,9 +105,12 @@ class WebSocketDaemonService extends DaemonService {
   Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 
   @override
-  Future<bool> connect({String host = 'localhost', int port = 9876}) async {
+  Future<bool> connect({String? host, int? port}) async {
+    if (_connected && _channel != null) return true; // already connected
     try {
-      final uri = Uri.parse('ws://$host:$port/ws');
+      final h = host ?? _defaultHost;
+      final p = port ?? _defaultPort;
+      final uri = Uri.parse('ws://$h:$p/ws');
       _channel = WebSocketChannel.connect(uri);
       await _channel!.ready;
       _connected = true;
@@ -285,7 +299,7 @@ class LocalDaemonService extends DaemonService {
   Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 
   @override
-  Future<bool> connect({String host = 'localhost', int port = 9876}) async {
+  Future<bool> connect({String? host, int? port}) async {
     _connected = true;
     _connectionController.add(true);
     _peerJoinController.add(_contacts[0]);

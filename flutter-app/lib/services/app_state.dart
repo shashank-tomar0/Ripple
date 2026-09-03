@@ -9,7 +9,7 @@ import '../utils/time.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
-import '../models/sos_alert.dart'
+import '../models/sos_alert.dart';
 import '../models/delivery_receipt.dart';
 import '../services/daemon_service.dart';
 import '../services/local_storage_service.dart';
@@ -23,7 +23,10 @@ class AppState extends ChangeNotifier {
   bool _connected = false;
   String _localPeerId = '';
   String _nickname = '';
-  List<Contact> _peers = [];
+  /// Known peers keyed by peer ID. Events from the daemon (peer_join /
+  /// peer_leave) are the source of truth; the getPeers() list endpoint is
+  /// only an optional initial snapshot.
+  final Map<String, Contact> _peersById = {};
   List<Message> _messages = [];
   List<Conversation> _conversations = [];
   List<FileTransfer> _fileTransfers = [];
@@ -43,12 +46,18 @@ class AppState extends ChangeNotifier {
   String get localPeerId => _localPeerId;
   String get nickname => _nickname;
   String get localPubKey => daemon.localPubKey;
-  List<Contact> get peers => _peers;
+  List<Contact> get peers {
+    final list = _peersById.values.toList()
+      ..sort((a, b) => a.displayName.toLowerCase()
+          .compareTo(b.displayName.toLowerCase()));
+    return list;
+  }
+
   List<Message> get messages => _messages;
   List<Conversation> get conversations => _conversations;
   bool get loading => _loading;
   String? get error => _error;
-  int get peerCount => _peers.length;
+  int get peerCount => _peersById.length;
   int get unreadTotal =>
       _conversations.fold(0, (sum, c) => sum + c.unreadCount);
 
@@ -93,7 +102,9 @@ class AppState extends ChangeNotifier {
       LocalStorageService.loadContacts(),
     ]);
     _messages = results[0] as List<Message>;
-    _peers = results[1] as List<Contact>;
+    for (final c in results[1] as List<Contact>) {
+      _peersById[c.peerId] = c;
+    }
   }
 
   /// Schedules a debounced persist (2 second quiet window).
@@ -112,7 +123,7 @@ class AppState extends ChangeNotifier {
 
   /// Immediately persists contacts without waiting for the debounce timer.
   Future<void> _persistContacts() async {
-    await LocalStorageService.saveContacts(_peers);
+    await LocalStorageService.saveContacts(peers);
   }
 
   /// Flushes any pending debounced save immediately.
@@ -189,13 +200,14 @@ class AppState extends ChangeNotifier {
     });
 
     daemon.onPeerJoined.listen((peer) {
-      _refreshPeers();
+      _upsertPeer(peer);
       notifyListeners();
       _schedulePersist();
     });
 
     daemon.onPeerLeft.listen((peer) {
-      _refreshPeers();
+      // The bridge sends peer_leave with is_online already false.
+      _upsertPeer(peer);
       notifyListeners();
       _schedulePersist();
     });
@@ -402,12 +414,64 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _refreshPeers() async {
-    _peers = await daemon.getPeers();
+  /// Adds or replaces a peer, preserving richer fields (public key, E2E key
+  /// id, hop count) that presence events don't carry.
+  void _upsertPeer(Contact incoming) {
+    final existing = _peersById[incoming.peerId];
+    if (existing == null) {
+      _peersById[incoming.peerId] = incoming;
+      return;
+    }
+    _peersById[incoming.peerId] = Contact(
+      peerId: incoming.peerId,
+      nickname: incoming.nickname.isNotEmpty
+          ? incoming.nickname
+          : existing.nickname,
+      publicKey: existing.publicKey ?? incoming.publicKey,
+      e2eKeyId: existing.e2eKeyId ?? incoming.e2eKeyId,
+      isOnline: incoming.isOnline,
+      lastSeen: incoming.isOnline ? DateTime.now() : existing.lastSeen,
+      hopCount: incoming.hopCount != 0 ? incoming.hopCount : existing.hopCount,
+    );
   }
 
+  Future<void> _refreshPeers() async {
+    final fetched = await daemon.getPeers();
+    for (final c in fetched) {
+      _upsertPeer(c);
+    }
+  }
+
+  /// Conversations are derived locally from the message cache and known
+  /// peers. The daemon does not serve conversation history over the wire
+  /// yet, so the app is the source of truth for its own chat list.
   Future<void> _refreshConversations() async {
-    _conversations = await daemon.getConversations();
+    final byPeer = <String, List<Message>>{};
+    for (final m in _messages) {
+      // SOS broadcasts have their own UI; keep them out of the chat list.
+      if (m.type == 'sos') continue;
+      final other = m.isSent ? m.recipient : m.sender;
+      if (other == null || other.isEmpty) continue;
+      byPeer.putIfAbsent(other, () => []).add(m);
+    }
+
+    final allPeerIds = <String>{...byPeer.keys, ..._peersById.keys};
+    final convs = <Conversation>[];
+    for (final pid in allPeerIds) {
+      final msgs = byPeer[pid] ?? const <Message>[];
+      convs.add(Conversation(
+        contact: contactForPeerId(pid) ?? Contact(peerId: pid),
+        // _messages is newest-first, so the first entry is the latest.
+        lastMessage: msgs.isEmpty ? null : msgs.first,
+        unreadCount: msgs.where((m) => !m.isSent).length,
+      ));
+    }
+    convs.sort((a, b) {
+      final ta = a.lastMessage?.timestamp ?? 0;
+      final tb = b.lastMessage?.timestamp ?? 0;
+      return tb.compareTo(ta); // most recently active conversation first
+    });
+    _conversations = convs;
   }
 
   /// Handles incoming delivery receipts and updates message status.
@@ -431,7 +495,5 @@ class AppState extends ChangeNotifier {
         .toList();
   }
 
-  Contact? contactForPeerId(String peerId) {
-    return _peers.where((c) => c.peerId == peerId).firstOrNull;
-  }
+  Contact? contactForPeerId(String peerId) => _peersById[peerId];
 }

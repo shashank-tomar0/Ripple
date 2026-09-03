@@ -67,8 +67,22 @@ class AppThemeNotifier extends ChangeNotifier {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Create daemon service (LocalDaemonService emits fake data for demo/dev).
-  final daemonService = LocalDaemonService();
+  // Talk to the real Ripple Go daemon over WebSocket by default.
+  // UI-only development without a daemon can opt into fake data with:
+  //   flutter run --dart-define=LOCAL_DEMO=true
+  // Point at a daemon on another host (e.g. the Android emulator reaches
+  // the host machine at 10.0.2.2) with:
+  //   flutter run --dart-define=DAEMON_HOST=10.0.2.2 --dart-define=DAEMON_PORT=9876
+  const useLocalDemo = bool.fromEnvironment('LOCAL_DEMO');
+  final daemonService = useLocalDemo
+      ? LocalDaemonService()
+      : WebSocketDaemonService(
+          host: const String.fromEnvironment(
+            'DAEMON_HOST',
+            defaultValue: 'localhost',
+          ),
+          port: const int.fromEnvironment('DAEMON_PORT', defaultValue: 9876),
+        );
 
   // Restore theme preference.
   final themeNotifier = AppThemeNotifier();
@@ -81,8 +95,8 @@ void main() async {
     unawaited(ForegroundService.start());
   }
 
-  // Kick off connection attempt — runs in background, no need to await.
-  unawaited(daemonService.connect());
+  // The connection attempt happens in AppState.init() (below), which owns
+  // the daemon lifecycle and reads identity/peers once connected.
 
   runApp(
     MultiProvider(

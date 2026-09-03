@@ -7,7 +7,11 @@ import 'package:flutter/foundation.dart';
 import '../utils/time.dart';
 
 /// Delivery receipt status matching the Go daemon.
-enum DeliveryStatus { sent, received, delivered, read, failed }
+///
+/// `sending` is a local-only transient state shown in the UI while a message
+/// is being transmitted; it never appears on the wire (Go sends sent/
+/// received/delivered/read/failed).
+enum DeliveryStatus { sending, sent, received, delivered, read, failed }
 
 /// Delivery receipt received from the mesh network.
 @immutable
