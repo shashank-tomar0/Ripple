@@ -147,7 +147,6 @@ class _QRScreenState extends State<QRScreen> {
                       Text(
                         'Peer ID: $shortId',
                         style: theme.textTheme.bodySmall?.copyWith(
-                          fontFamily: 'RobotoMono',
                           color: colorScheme.onSurfaceVariant,
                         ),
                         overflow: TextOverflow.ellipsis,
@@ -356,7 +355,6 @@ class _QRScreenState extends State<QRScreen> {
                   child: Text(
                     _localPeerId,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'RobotoMono',
                       color: colorScheme.onSurfaceVariant,
                     ),
                     overflow: TextOverflow.ellipsis,

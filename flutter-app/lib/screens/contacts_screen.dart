@@ -280,7 +280,6 @@ class _PeerTile extends StatelessWidget {
                 contact.shortId,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'RobotoMono',
                   color: colorScheme.onSurfaceVariant.withOpacity(0.7),
                 ),
               ),
