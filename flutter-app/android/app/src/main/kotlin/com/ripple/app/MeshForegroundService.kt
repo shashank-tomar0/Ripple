@@ -7,7 +7,6 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.os.Process
 import java.io.File
 
 class MeshForegroundService : Service() {
@@ -19,7 +18,7 @@ class MeshForegroundService : Service() {
         const val ACTION_STOP = "com.ripple.app.STOP_MESH"
     }
 
-    private var daemonProcess: Process? = null
+    private var daemonProcess: java.lang.Process? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -67,7 +66,7 @@ class MeshForegroundService : Service() {
             dataDir.mkdirs()
 
             val builder = ProcessBuilder(
-                applicationInfo.nativeLibDir + "/librippled.so",
+                applicationInfo.nativeLibraryDir + "/librippled.so",
                 "-port", "9000",
                 "-wsport", "9876",
                 "-nick", android.os.Build.MODEL,
