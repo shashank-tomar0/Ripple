@@ -2,6 +2,8 @@
 // FileTransfer tracks file transfer state between peers through the mesh network.
 library;
 
+import '../utils/time.dart';
+
 /// The status of a file transfer operation.
 enum FileTransferStatus {
   pending,
@@ -61,7 +63,8 @@ class FileTransfer {
         sender: json['sender'] as String,
         senderNick: json['sender_nick'] as String? ?? '',
         recipient: json['recipient'] as String?,
-        timestamp: json['ts'] as int? ?? DateTime.now().microsecondsSinceEpoch,
+        // Wire 'ts' is Unix nanoseconds (Go: Message.Timestamp = UnixNano).
+        timestamp: json['ts'] as int? ?? unixNanosNow(),
         status: FileTransferStatus.values.firstWhere(
           (e) => e.name == json['status'],
           orElse: () => FileTransferStatus.pending,

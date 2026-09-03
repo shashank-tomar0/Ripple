@@ -8,6 +8,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import '../utils/time.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
@@ -312,7 +313,7 @@ class LocalDaemonService extends DaemonService {
       _deliveryReceiptController.add(DeliveryReceipt(
         messageId: message.id,
         status: DeliveryStatus.sent,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
+        timestamp: unixNanosNow(),
       ));
 
       // "delivered" after 0.5-1 second
@@ -321,7 +322,7 @@ class LocalDaemonService extends DaemonService {
           messageId: message.id,
           status: DeliveryStatus.delivered,
           hops: 1 + _rand.nextInt(3),
-          timestamp: DateTime.now().millisecondsSinceEpoch,
+          timestamp: unixNanosNow(),
         ));
       });
 
@@ -331,7 +332,7 @@ class LocalDaemonService extends DaemonService {
           messageId: message.id,
           status: DeliveryStatus.read,
           hops: 1 + _rand.nextInt(3),
-          timestamp: DateTime.now().millisecondsSinceEpoch,
+          timestamp: unixNanosNow(),
         ));
       });
 
@@ -348,7 +349,7 @@ class LocalDaemonService extends DaemonService {
               'Unknown',
           recipient: localPeerId,
           payload: _randomReply(),
-          timestamp: DateTime.now().microsecondsSinceEpoch,
+          timestamp: unixNanosNow(),
         );
         _messages.putIfAbsent(reply.sender, () => []);
         _messages[reply.sender]!.insert(0, reply);

@@ -5,6 +5,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import '../utils/time.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
@@ -213,7 +214,7 @@ class AppState extends ChangeNotifier {
       senderNick: _nickname,
       recipient: recipient,
       payload: text,
-      timestamp: DateTime.now().microsecondsSinceEpoch,
+      timestamp: unixNanosNow(),
       isSent: true,
     );
 
@@ -254,7 +255,7 @@ class AppState extends ChangeNotifier {
       senderNick: _nickname,
       recipient: null, // Broadcast
       payload: payload,
-      timestamp: DateTime.now().microsecondsSinceEpoch,
+      timestamp: unixNanosNow(),
       ttl: 64,
       hopCount: 0,
       isSent: true,
@@ -289,7 +290,7 @@ class AppState extends ChangeNotifier {
   }
 
   /// Handles an incoming SOS message from the mesh.
-  void handleIncomingSOS(Map<String, dynamic> json) {
+  Future<void> handleIncomingSOS(Map<String, dynamic> json) async {
     final alert = SOSAlert.fromJson(json);
 
     // Check if we already have this alert
@@ -337,7 +338,7 @@ class AppState extends ChangeNotifier {
       senderNick: _nickname,
       recipient: recipient,
       payload: payload,
-      timestamp: DateTime.now().microsecondsSinceEpoch,
+      timestamp: unixNanosNow(),
       isSent: true,
     );
 
@@ -349,7 +350,7 @@ class AppState extends ChangeNotifier {
       sender: _localPeerId,
       senderNick: _nickname,
       recipient: recipient,
-      timestamp: DateTime.now().microsecondsSinceEpoch,
+      timestamp: unixNanosNow(),
       status: FileTransferStatus.sending,
       isIncoming: false,
     );

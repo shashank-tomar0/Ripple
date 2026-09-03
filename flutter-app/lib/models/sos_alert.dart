@@ -1,6 +1,12 @@
-// Package models defines the data types shared across the Ripple Flutter app.
-// These mirror the Go daemon's message types for seamless serialization.
+// Canonical SOS alert model.
+// SOSAlert and SOSUrgency are defined ONLY here (previously duplicated in
+// message.dart, which caused ambiguous-import compile errors). Other files
+// can import sos_alert.dart directly or through message.dart's re-export.
 library;
+
+import 'package:flutter/material.dart';
+
+import '../utils/time.dart';
 
 /// Represents an active SOS emergency alert in the mesh network.
 class SOSAlert {
@@ -35,6 +41,16 @@ class SOSAlert {
   });
 
   factory SOSAlert.fromJson(Map<String, dynamic> json) {
+    // Wire 'ts' is Unix nanoseconds (Go: time.Now().UnixNano()).
+    final ts = json['ts'] as int? ?? unixNanosNow();
+    final receivedAt = DateTime.fromMillisecondsSinceEpoch(ts ~/ 1000000);
+
+    // The daemon's bridge sends 'expire_min'; the Go payload uses
+    // 'expire_minutes'. Accept both, defaulting to the Go default (60).
+    final expireMinutes = (json['expire_min'] as int?) ??
+        (json['expire_minutes'] as int?) ??
+        60;
+
     return SOSAlert(
       id: json['id'] as String,
       sender: json['sender'] as String,
@@ -44,9 +60,8 @@ class SOSAlert {
       latitude: (json['lat'] as num?)?.toDouble(),
       longitude: (json['lon'] as num?)?.toDouble(),
       accuracy: (json['accuracy'] as num?)?.toDouble(),
-      receivedAt: DateTime.fromMillisecondsSinceEpoch(
-          (json['ts'] as int? ?? DateTime.now().millisecondsSinceEpoch) ~/ 1000000),
-      expiresAt: DateTime.now().add(const Duration(minutes: 10)), // Will be set from expire_min
+      receivedAt: receivedAt,
+      expiresAt: receivedAt.add(Duration(minutes: expireMinutes)),
       ackCount: json['ack_count'] as int? ?? 0,
       ackRequired: json['ack_required'] as bool? ?? true,
       isOwn: json['is_own'] as bool? ?? false,
@@ -63,7 +78,7 @@ class SOSAlert {
       if (latitude != null) 'lat': latitude,
       if (longitude != null) 'lon': longitude,
       if (accuracy != null) 'accuracy': accuracy,
-      'ts': receivedAt.millisecondsSinceEpoch * 1000000,
+      'ts': receivedAt.millisecondsSinceEpoch * 1000000, // nanos on the wire
       'ack_count': ackCount,
       'ack_required': ackRequired,
       'is_own': isOwn,

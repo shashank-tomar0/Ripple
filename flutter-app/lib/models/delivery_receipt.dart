@@ -4,6 +4,8 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import '../utils/time.dart';
+
 /// Delivery receipt status matching the Go daemon.
 enum DeliveryStatus { sent, received, delivered, read, failed }
 
@@ -28,7 +30,8 @@ class DeliveryReceipt {
         messageId: json['msg_id'] as String,
         status: _parseStatus(json['status'] as String? ?? 'sent'),
         hops: json['hops'] as int? ?? 0,
-        timestamp: json['ts'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+        // Wire 'ts' is Unix nanoseconds (Go: DeliveryInfo.Timestamp = UnixNano).
+        timestamp: json['ts'] as int? ?? unixNanosNow(),
         error: json['error'] as String?,
       );
 
