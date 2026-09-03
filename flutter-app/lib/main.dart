@@ -8,8 +8,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'models/contact.dart';
-import 'models/message.dart';
 import 'services/daemon_service.dart';
 import 'services/app_state.dart';
 import 'services/foreground_service.dart';

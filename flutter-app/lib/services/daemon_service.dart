@@ -5,7 +5,6 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../utils/time.dart';
@@ -41,19 +40,6 @@ abstract class DaemonService {
   Stream<Contact> get onPeerLeft;
   Stream<bool> get onConnectionState;
   Stream<DeliveryReceipt> get onDeliveryReceipt;
-
-  /// Send raw bytes into the mesh (used by BLE relay and other transports).
-  /// The data is wrapped in a `ble_data` message and sent to the daemon.
-  void sendRaw(Uint8List data);
-
-  /// Stream of raw bytes received from the mesh that should be forwarded
-  /// to a local transport (e.g. BLE). Each event is a raw payload destined
-  /// for a local peer.
-  Stream<Uint8List> get onBLEData;
-
-  /// Stream indicating the BLE transport connection state between the
-  /// Flutter app and the daemon.
-  Stream<bool> get onBLETransportState;
 }
 
 /// WebSocket implementation — connects to the Ripple Go daemon.
@@ -82,10 +68,6 @@ class WebSocketDaemonService extends DaemonService {
   final _connectionController = StreamController<bool>.broadcast();
   final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
 
-  // BLE relay controllers.
-  final _bleDataController = StreamController<Uint8List>.broadcast();
-  final _bleTransportStateController = StreamController<bool>.broadcast();
-
   @override
   bool get isConnected => _connected;
 
@@ -97,12 +79,6 @@ class WebSocketDaemonService extends DaemonService {
 
   @override
   String get localPubKey => _pubKey;
-
-  @override
-  Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
-
-  @override
-  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 
   @override
   Future<bool> connect({String? host, int? port}) async {
@@ -183,19 +159,6 @@ class WebSocketDaemonService extends DaemonService {
       case 'delivery_ack':
         _deliveryReceiptController.add(DeliveryReceipt.fromJson(json));
         break;
-      case 'ble_data':
-        // BLE data relayed from the daemon (received from another mesh peer).
-        final payload = json['payload'] as String?;
-        if (payload != null) {
-          final bytes = base64Decode(payload);
-          _bleDataController.add(bytes);
-        }
-        break;
-      case 'ble_transport_state':
-        // Daemon reports BLE transport state change.
-        final enabled = json['enabled'] as bool? ?? false;
-        _bleTransportStateController.add(enabled);
-        break;
     }
   }
 
@@ -208,20 +171,6 @@ class WebSocketDaemonService extends DaemonService {
     } catch (e) {
       debugPrint('Send error: $e');
       return false;
-    }
-  }
-
-  @override
-  void sendRaw(Uint8List data) {
-    if (!_connected || _channel == null) return;
-    try {
-      final msg = {
-        'type': 'ble_data',
-        'payload': base64Encode(data),
-      };
-      _channel!.sink.add(jsonEncode(msg));
-    } catch (e) {
-      debugPrint('BLE sendRaw error: $e');
     }
   }
 
@@ -251,12 +200,6 @@ class WebSocketDaemonService extends DaemonService {
 
   @override
   Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
-
-  @override
-  Stream<Uint8List> get onBLEData => _bleDataController.stream;
-
-  @override
-  Stream<bool> get onBLETransportState => _bleTransportStateController.stream;
 }
 
 /// Local demo service — generates fake messages for UI development.
@@ -268,8 +211,6 @@ class LocalDaemonService extends DaemonService {
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
   final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
-  final _bleDataController = StreamController<Uint8List>.broadcast();
-  final _bleTransportStateController = StreamController<bool>.broadcast();
 
   final _contacts = <Contact>[
     Contact(peerId: '12D3KooW9a…v1x2', nickname: 'Alice', isOnline: true, hopCount: 0),
@@ -291,12 +232,6 @@ class LocalDaemonService extends DaemonService {
 
   @override
   String get localPubKey => 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-
-  @override
-  Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
-
-  @override
-  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
 
   @override
   Future<bool> connect({String? host, int? port}) async {
@@ -462,6 +397,9 @@ class LocalDaemonService extends DaemonService {
   Stream<Message> get onMessage => _messageController.stream;
 
   @override
+  Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
+
+  @override
   Stream<Contact> get onPeerJoined => _peerJoinController.stream;
 
   @override
@@ -472,17 +410,4 @@ class LocalDaemonService extends DaemonService {
 
   @override
   Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
-
-  @override
-  void sendRaw(Uint8List data) {
-    // In local demo mode, we just echo the data back via onBLEData
-    // for testing BLE transport integration.
-    Future.microtask(() => _bleDataController.add(data));
-  }
-
-  @override
-  Stream<Uint8List> get onBLEData => _bleDataController.stream;
-
-  @override
-  Stream<bool> get onBLETransportState => _bleTransportStateController.stream;
 }

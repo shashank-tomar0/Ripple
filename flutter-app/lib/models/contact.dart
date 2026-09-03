@@ -3,6 +3,8 @@ library;
 
 import 'dart:convert';
 
+import 'message.dart';
+
 class Contact {
   final String peerId;
   final String nickname;

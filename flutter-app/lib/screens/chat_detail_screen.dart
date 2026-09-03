@@ -265,6 +265,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       return _MessageBubble(
                         message: message,
                         transfer: transfer,
+                        onRetrySend: () => _retrySend(message),
                       );
                     },
                   ),
@@ -413,9 +414,13 @@ class _MessageBubble extends StatelessWidget {
   final Message message;
   final FileTransfer? transfer;
 
+  /// Invoked when the user taps a failed sent message to retry.
+  final VoidCallback? onRetrySend;
+
   const _MessageBubble({
     required this.message,
     this.transfer,
+    this.onRetrySend,
   });
 
   @override
@@ -458,8 +463,9 @@ class _MessageBubble extends StatelessWidget {
               ),
             ),
             child: message.isFile
-                ? _buildFileContent(timeStr, timeColor, textColor)
-                : _buildTextContent(timeStr, textColor, timeColor, isOwn),
+                ? _buildFileContent(context, timeStr, timeColor, textColor)
+                : _buildTextContent(
+                    timeStr, textColor, timeColor, isOwn, colorScheme),
           ),
         ],
       ),
@@ -472,6 +478,7 @@ class _MessageBubble extends StatelessWidget {
     Color textColor,
     Color timeColor,
     bool isOwn,
+    ColorScheme colorScheme,
   ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -508,7 +515,8 @@ class _MessageBubble extends StatelessWidget {
             ),
             if (isOwn) ...[
               const SizedBox(width: 4),
-              _buildStatusIcon(message, timeColor),
+              _buildStatusIcon(message, timeColor, colorScheme,
+                  onRetry: onRetrySend),
             ],
             if (!message.encrypted && !isOwn) ...[
               const SizedBox(width: 6),
@@ -525,7 +533,12 @@ class _MessageBubble extends StatelessWidget {
   }
 
   /// Builds the status icon based on message delivery status.
-  Widget _buildStatusIcon(Message message, Color timeColor) {
+  Widget _buildStatusIcon(
+    Message message,
+    Color timeColor,
+    ColorScheme colorScheme, {
+    VoidCallback? onRetry,
+  }) {
     if (!message.isSent) {
       // This shouldn't happen for received messages, but handle gracefully
       return const SizedBox.shrink();
@@ -567,7 +580,7 @@ class _MessageBubble extends StatelessWidget {
         );
       case DeliveryStatus.failed:
         return GestureDetector(
-          onTap: () => _retrySend(message),
+          onTap: () => onRetry?.call(),
           child: Icon(
             Icons.error_outline,
             size: 14,
@@ -583,20 +596,16 @@ class _MessageBubble extends StatelessWidget {
     }
   }
 
-  /// Retries sending a failed message.
-  void _retrySend(Message message) {
-    final appState = context.read<AppState>();
-    // For now, just update status to sending
-    message.status = DeliveryStatus.sending;
-    notifyListeners();
-    // In a real implementation, you'd call appState.sendMessage(...)
-  }
 
   /// Renders a file message bubble with icon, name, size, progress bar, and status.
-  Widget _buildFileContent(String timeStr, Color timeColor, Color textColor) {
+  Widget _buildFileContent(
+    BuildContext context,
+    String timeStr,
+    Color timeColor,
+    Color textColor,
+  ) {
     final isOwn = message.isSent;
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
+    final colorScheme = Theme.of(context).colorScheme;
 
     // Parse file metadata from the JSON payload.
     String fileName;
