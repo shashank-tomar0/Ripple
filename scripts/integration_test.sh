@@ -32,10 +32,24 @@ NODE1_PID="" NODE2_PID="" NODE3_PID="" PROBE_PID=""
 
 cleanup() {
   [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null || true
-  [ -n "$NODE1_PID" ] && kill "$NODE1_PID" 2>/dev/null || true
-  [ -n "$NODE2_PID" ] && kill "$NODE2_PID" 2>/dev/null || true
-  [ -n "$NODE3_PID" ] && kill "$NODE3_PID" 2>/dev/null || true
-  rm -rf "$WORK"
+  # Signal the daemons, then WAIT for them to exit and flush before
+  # removing their data dirs — otherwise rm can race a still-running node
+  # that is writing into its directory (a real CI failure we hit).
+  for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+    [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  done
+  for _ in 1 2 3 4 5; do
+    alive=""
+    for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+      [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive="$alive $p"
+    done
+    [ -n "$alive" ] || break
+    sleep 1
+  done
+  for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+    [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
+  done
+  rm -rf "$WORK" 2>/dev/null || { sleep 1; rm -rf "$WORK" 2>/dev/null || true; }
 }
 trap cleanup EXIT
 
