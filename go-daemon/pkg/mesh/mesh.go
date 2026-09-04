@@ -17,21 +17,24 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
-	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/multiformats/go-multiaddr"
 
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/routing"
 )
 
 const (
@@ -80,6 +83,12 @@ type Node struct {
 	// relay visualization and the delivery audit trail.
 	OnRelay func(RelayEvent)
 
+	// Forwarder is the destination-aware forwarding decision layer. The
+	// default (nil) is epidemic flooding; WithSprayBudget installs the
+	// PROPHET-guided spray-and-wait forwarder. The exact same decision
+	// code drives the deterministic simulator in pkg/routing/sim.
+	Forwarder routing.Forwarder
+
 	// MDNSDisabled suppresses mDNS peer discovery when true (must be set
 	// via WithMDNS before Start). Peers then only appear via explicit
 	// ConnectToPeer dials — needed for deterministic test topologies.
@@ -88,6 +97,19 @@ type Node struct {
 	// Message relay
 	seenLock sync.RWMutex
 	seen     map[string]bool // dedup message IDs
+
+	// RouteState guards destination-aware routing state: per-peer
+	// predictability (encounters) and the per-message ledger of peers we
+	// have handed copies to.
+	routeLock  sync.Mutex
+	encounters map[string]routing.EncounterStat
+	sprayed    map[string]map[string]bool // msgID → peers handed a copy
+
+	// SprayBudget is the destination-aware routing copy budget L: at most L
+	// physical copies of an addressed message exist at any time. 0 disables
+	// routing — the node floods (epidemic re-broadcast), the historical
+	// behavior. Broadcasts (no recipient) always flood regardless.
+	SprayBudget int
 
 	// Logging
 	Debug bool
@@ -110,8 +132,8 @@ const (
 
 // RelayEvent describes a message's passage through this node. Every field
 // is factual: the message ID, the action taken, the peer it came from
-// (empty for locally sent messages), and the message's hop/TTL state at
-// the moment of the event.
+// (empty for locally sent messages), and the message's hop/TTL/copy state
+// at the moment of the event.
 type RelayEvent struct {
 	MessageID string
 	Type      message.MessageType
@@ -119,6 +141,7 @@ type RelayEvent struct {
 	From      string // peer this message arrived from; "" for local sends
 	Hops      int
 	TTL       int
+	Copies    int   // physical copies of the message that exist, as known here
 	Timestamp int64 // Unix nanoseconds
 }
 
@@ -147,6 +170,21 @@ func WithMDNS(enabled bool) Option {
 	}
 }
 
+// WithSprayBudget enables destination-aware routing for addressed messages
+// with copy budget L (the original copy counts as one). L <= 0 keeps the
+// epidemic flood. Broadcasts (no recipient) always flood.
+func WithSprayBudget(L int) Option {
+	return func(n *Node) {
+		if L <= 0 {
+			n.SprayBudget = 0
+			n.Forwarder = nil
+			return
+		}
+		n.SprayBudget = L
+		n.Forwarder = routing.SprayAndWait{L: L}
+	}
+}
+
 // NewNode creates a new Ripple mesh node.
 func NewNode(ctx context.Context, privKey crypto.PrivKey, listenPort int, opts ...Option) (*Node, error) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -159,13 +197,15 @@ func NewNode(ctx context.Context, privKey crypto.PrivKey, listenPort int, opts .
 	}
 
 	n := &Node{
-		ctx:     ctx,
-		cancel:  cancel,
-		PrivKey: privKey,
-		PeerID:  pid,
-		peers:   make(map[peer.ID]bool),
-		seen:    make(map[string]bool),
-		Log:     log.Default(),
+		ctx:        ctx,
+		cancel:     cancel,
+		PrivKey:    privKey,
+		PeerID:     pid,
+		peers:      make(map[peer.ID]bool),
+		seen:       make(map[string]bool),
+		encounters: make(map[string]routing.EncounterStat),
+		sprayed:    make(map[string]map[string]bool),
+		Log:        log.Default(),
 	}
 
 	for _, opt := range opts {
@@ -198,6 +238,23 @@ func NewNode(ctx context.Context, privKey crypto.PrivKey, listenPort int, opts .
 
 	// Set stream handler for direct peer-to-peer chat
 	h.SetStreamHandler(ProtocolID, n.handleStream)
+
+	// Track peers at the CONNECTION level, not just when a stream or mDNS
+	// event happens: any established connection is a peer that destination-
+	// aware routing may hand a copy to.
+	h.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(net network.Network, conn network.Conn) {
+			// Record the address we actually connected to: without this, a
+			// peer that DIALS us is reachable for the connection it made but
+			// not dialable back ("no addresses") until Identify runs — a
+			// fatal gap for direct-stream routing, invisible under pubsub.
+			net.Peerstore().AddAddr(conn.RemotePeer(), conn.RemoteMultiaddr(), peerstore.PermanentAddrTTL)
+			n.addPeer(conn.RemotePeer())
+		},
+		DisconnectedF: func(net network.Network, conn network.Conn) {
+			n.removePeer(conn.RemotePeer())
+		},
+	})
 
 	if n.Debug {
 		n.Log.Printf("🔗 libp2p host: %s", h.ID())
@@ -268,6 +325,11 @@ func (n *Node) StartSeenCleanup(ctx context.Context) {
 				// since message IDs are random and collisions are astronomically unlikely
 				n.seen = make(map[string]bool)
 				n.seenLock.Unlock()
+				n.routeLock.Lock()
+				// The sprayed-copy ledger has the same lifetime as dedup: a
+				// message older than the dedup window is dead to this node.
+				n.sprayed = make(map[string]map[string]bool)
+				n.routeLock.Unlock()
 				if n.Debug {
 					n.Log.Printf("pruned dedup cache")
 				}
@@ -303,12 +365,33 @@ func (n *Node) SendMessage(msg *message.Message) error {
 		n.Log.Printf("📤 sending message %s (type: %s, to: %q)", shortID, msg.Type, msg.Recipient)
 	}
 
+	// Destination-aware routing applies only to addressed messages on nodes
+	// with a configured budget. Broadcasts and budget-less nodes keep the
+	// epidemic flood exactly as before.
+	if msg.Recipient != "" && n.SprayBudget > 0 {
+		if msg.CopiesMade < 1 {
+			msg.CopiesMade = 1
+		}
+		n.emitRelay(RelayEvent{
+			MessageID: msg.ID,
+			Type:      msg.Type,
+			Action:    RelaySent,
+			Hops:      0,
+			TTL:       msg.TTL,
+			Copies:    msg.CopiesMade,
+			Timestamp: time.Now().UnixNano(),
+		})
+		n.routeToPeers(msg, "")
+		return nil
+	}
+
 	n.emitRelay(RelayEvent{
 		MessageID: msg.ID,
 		Type:      msg.Type,
 		Action:    RelaySent,
 		Hops:      0,
 		TTL:       msg.TTL,
+		Copies:    msg.CopiesMade,
 		Timestamp: time.Now().UnixNano(),
 	})
 
@@ -365,14 +448,25 @@ func (n *Node) handleStream(s network.Stream) {
 		n.Log.Printf("📩 incoming stream from %s", pid.ShortString())
 	}
 
+	// Peer membership follows CONNECTIONS, not streams: a peer that closes
+	// one stream may still be connected (and reachable) for the next. The
+	// connection notifiee removes peers when the connection itself drops.
+	// (Removing here made peers vanish from KnownPeers after a single
+	// stream — fatal for direct-stream routing, invisible under pubsub.)
 	n.addPeer(pid)
-	defer n.removePeer(pid)
 	defer s.Close()
 
 	// Set a read deadline
 	s.SetDeadline(time.Now().Add(DefaultMessageTimeout))
 
+	t0 := time.Now()
+	if n.Debug {
+		n.Log.Printf("stream from %s: reading", pid.ShortString())
+	}
 	data, err := io.ReadAll(s)
+	if n.Debug {
+		n.Log.Printf("stream from %s: read %d bytes in %s", pid.ShortString(), len(data), time.Since(t0).Round(time.Millisecond))
+	}
 	if err != nil {
 		if n.Debug {
 			n.Log.Printf("stream read error from %s: %v", pid.ShortString(), err)
@@ -444,12 +538,18 @@ func (n *Node) deliverMessage(msg *message.Message, from string) {
 			From:      from,
 			Hops:      msg.HopCount,
 			TTL:       msg.TTL,
+			Copies:    msg.CopiesMade,
 			Timestamp: time.Now().UnixNano(),
 		})
 		return
 	}
 	n.seen[msg.ID] = true
 	n.seenLock.Unlock()
+
+	// A message from a real peer IS an encounter: refresh predictability.
+	if from != "" {
+		n.recordEncounter(from, time.Now().Unix())
+	}
 
 	// Emit the arrival event.
 	n.emitRelay(RelayEvent{
@@ -459,6 +559,7 @@ func (n *Node) deliverMessage(msg *message.Message, from string) {
 		From:      from,
 		Hops:      msg.HopCount,
 		TTL:       msg.TTL,
+		Copies:    msg.CopiesMade,
 		Timestamp: time.Now().UnixNano(),
 	})
 
@@ -471,24 +572,7 @@ func (n *Node) deliverMessage(msg *message.Message, from string) {
 	// Relay if TTL > 0 (store-and-forward)
 	if msg.TTL > 0 && (senderErr != nil || senderPID != n.Host.ID()) {
 		msg.DecrementTTL()
-		n.emitRelay(RelayEvent{
-			MessageID: msg.ID,
-			Type:      msg.Type,
-			Action:    RelayForwarded,
-			From:      from,
-			Hops:      msg.HopCount,
-			TTL:       msg.TTL,
-			Timestamp: time.Now().UnixNano(),
-		})
-		go func() {
-			if n.Topic == nil {
-				return // not started; nothing to relay onto
-			}
-			data, _ := msg.Serialize()
-			if err := n.Topic.Publish(n.ctx, data); err != nil && n.Debug {
-				n.Log.Printf("relay error: %v", err)
-			}
-		}()
+		n.forwardMessage(msg, from)
 	} else if msg.TTL <= 0 && (senderErr != nil || senderPID != n.Host.ID()) {
 		// TTL exhausted: the message dies at this node.
 		n.emitRelay(RelayEvent{
@@ -498,6 +582,7 @@ func (n *Node) deliverMessage(msg *message.Message, from string) {
 			From:      from,
 			Hops:      msg.HopCount,
 			TTL:       msg.TTL,
+			Copies:    msg.CopiesMade,
 			Timestamp: time.Now().UnixNano(),
 		})
 	}
@@ -527,6 +612,164 @@ func (n *Node) emitRelay(evt RelayEvent) {
 		n.OnRelay(evt)
 	}
 }
+
+// forwardMessage hands a received message onward. Destination-aware nodes
+// route it through the decision layer; everyone else floods via pubsub
+// (the historical epidemic behavior).
+func (n *Node) forwardMessage(msg *message.Message, from string) {
+	if n.SprayBudget > 0 && msg.Recipient != "" {
+		n.routeToPeers(msg, from)
+		return
+	}
+
+	n.emitRelay(RelayEvent{
+		MessageID: msg.ID,
+		Type:      msg.Type,
+		Action:    RelayForwarded,
+		From:      from,
+		Hops:      msg.HopCount,
+		TTL:       msg.TTL,
+		Copies:    msg.CopiesMade,
+		Timestamp: time.Now().UnixNano(),
+	})
+	go func() {
+		if n.Topic == nil {
+			return // not started; nothing to relay onto
+		}
+		data, _ := msg.Serialize()
+		if err := n.Topic.Publish(n.ctx, data); err != nil && n.Debug {
+			n.Log.Printf("relay error: %v", err)
+		}
+	}()
+}
+
+// routeToPeers forwards an addressed message to the peers the routing
+// decision layer selects, over direct streams — never back to the peer it
+// arrived from. The spray budget travels on the wire (CopiesMade), so every
+// carrier shares the same accounting.
+func (n *Node) routeToPeers(msg *message.Message, from string) {
+	n.routeLock.Lock()
+	defer n.routeLock.Unlock()
+
+	f := n.Forwarder
+	if f == nil {
+		f = routing.SprayAndWait{L: n.SprayBudget}
+	}
+	me := n.Host.ID().String()
+	state := routing.MessageState{
+		ID:         msg.ID,
+		Src:        msg.Sender,
+		Dst:        msg.Recipient,
+		CopiesMade: msg.CopiesMade,
+		TTL:        int64(msg.TTL),
+	}
+	// Our own predictability for the destination. The PEER's predictability
+	// (driving PROPHET handoff) requires predictability-vector exchange at
+	// encounter — a later protocol slice; the decision layer already
+	// implements handoff for the simulator.
+	myStat := n.statForDestinationLocked(msg.Recipient, time.Now().Unix())
+
+	for _, pid := range n.routingCandidates(from) {
+		peerStr := pid.String()
+		peerHoldsCopy := n.sprayed[msg.ID][peerStr]
+		action := f.Decide(&state, me, peerStr, myStat, routing.EncounterStat{}, peerHoldsCopy)
+
+		switch action {
+		case routing.ActionSpray:
+			// A brand-new copy: consume one unit of the budget, carried on
+			// the wire so downstream carriers see the updated count.
+			state.CopiesMade++
+			msg.CopiesMade = state.CopiesMade
+			fallthrough
+		case routing.ActionDeliver, routing.ActionHandoff:
+			n.markSprayed(msg.ID, peerStr)
+			n.emitRelay(RelayEvent{
+				MessageID: msg.ID,
+				Type:      msg.Type,
+				Action:    RelayForwarded,
+				From:      from,
+				Hops:      msg.HopCount,
+				TTL:       msg.TTL,
+				Copies:    msg.CopiesMade,
+				Timestamp: time.Now().UnixNano(),
+			})
+			n.sendCopy(pid, msg)
+		default:
+			// ActionKeep: budget spent, no better relay in view.
+			// ActionDup: peer already holds a copy from us.
+		}
+	}
+}
+
+// sendCopy pushes the message to a peer over a direct stream.
+func (n *Node) sendCopy(pid peer.ID, msg *message.Message) {
+	data, err := msg.Serialize()
+	if err != nil {
+		if n.Debug {
+			n.Log.Printf("route serialize error: %v", err)
+		}
+		return
+	}
+	if err := n.sendDirect(pid, data); err != nil && n.Debug {
+		n.Log.Printf("route send to %s failed: %v", pid.ShortString(), err)
+	}
+}
+
+// recordEncounter refreshes our predictability for a peer we just met.
+// Transitivity needs the peer's own predictability vector (exchanged at
+// encounter in a later slice), so this applies the encounter and aging
+// kinetics only.
+func (n *Node) recordEncounter(peerID string, now int64) {
+	n.routeLock.Lock()
+	defer n.routeLock.Unlock()
+
+	stat, ok := n.encounters[peerID]
+	if !ok {
+		stat = routing.EncounterStat{Peer: peerID}
+	}
+	stat.AgePredictability(stat.Aging(now))
+	stat.RecordEncounter(now, nil)
+	n.encounters[peerID] = stat
+}
+
+// statForDestinationLocked returns our current predictability for dst,
+// aged up to the present. Caller holds routeLock.
+func (n *Node) statForDestinationLocked(dst string, now int64) routing.EncounterStat {
+	stat, ok := n.encounters[dst]
+	if !ok {
+		return routing.EncounterStat{Peer: dst}
+	}
+	stat.AgePredictability(stat.Aging(now))
+	return stat
+}
+
+// routingCandidates lists known peers a message may be forwarded to: every
+// connected peer except ourselves and the peer it arrived from (never hand
+// a copy back to its source — that is pure ping-pong waste). Sorted so the
+// decisions are deterministic regardless of map iteration order.
+func (n *Node) routingCandidates(from string) []peer.ID {
+	peers := n.KnownPeers()
+	out := make([]peer.ID, 0, len(peers))
+	me := n.Host.ID().String()
+	for _, p := range peers {
+		if p.String() == me || (from != "" && p.String() == from) {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// markSprayed records that we handed a copy of msgID to peer (dedup: don't
+// hand a second copy to the same peer). Caller holds routeLock.
+func (n *Node) markSprayed(msgID, peer string) {
+	if n.sprayed[msgID] == nil {
+		n.sprayed[msgID] = make(map[string]bool)
+	}
+	n.sprayed[msgID][peer] = true
+}
+
 // KnownPeers returns the list of peer IDs we've connected to.
 func (n *Node) KnownPeers() []peer.ID {
 	n.peerLock.RLock()

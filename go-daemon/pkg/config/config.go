@@ -58,6 +58,15 @@ type Config struct {
 	// exits without starting the daemon. The restored keypair is identical
 	// to the one on the device that produced the phrase.
 	ImportSeed string
+
+	// RoutingMode selects the message-forwarding policy: "epidemic" (the
+	// default flood) or "spray" (destination-aware spray-and-wait with a
+	// bounded copy budget). Broadcasts always flood.
+	RoutingMode string
+
+	// SprayBudget is the copy budget L for spray routing: at most L
+	// physical copies of an addressed message. Ignored in epidemic mode.
+	SprayBudget int
 }
 
 // Parse parses CLI flags and returns a Config.
@@ -73,6 +82,8 @@ func Parse() *Config {
 	flag.BoolVar(&c.NoMDNS, "nomdns", false, "Disable mDNS discovery (explicit bootstrap only)")
 	flag.BoolVar(&c.ExportSeed, "export-seed", false, "Print the identity's 24-word BIP39 backup phrase and exit")
 	flag.StringVar(&c.ImportSeed, "import-seed", "", "Restore identity from a BIP39 backup phrase and exit")
+	flag.StringVar(&c.RoutingMode, "routing", "epidemic", "Forwarding policy: epidemic (flood) or spray (bounded-copy routing)")
+	flag.IntVar(&c.SprayBudget, "spray-budget", 4, "Copy budget L for spray routing (addressed messages only)")
 
 	var dataDir string
 	flag.StringVar(&dataDir, "data", "", "Data directory (default: ~/.ripple)")

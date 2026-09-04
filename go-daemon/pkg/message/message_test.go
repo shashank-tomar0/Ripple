@@ -1,8 +1,8 @@
 package message
 
 import (
-	"testing"
 	"encoding/json"
+	"testing"
 )
 
 func TestNewChat(t *testing.T) {

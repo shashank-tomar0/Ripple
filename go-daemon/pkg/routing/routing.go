@@ -28,6 +28,8 @@
 // it — see routing_test.go and sim/sim_test.go.
 package routing
 
+import "math"
+
 // Predictability kinetics — PROPHET (Lindgren, Doria, Schelén 2003), §2.
 // PInit is the predictability granted by a first encounter; Beta dampens
 // transitivity; Gamma and AgeUnits control how fast predictability decays
@@ -64,15 +66,16 @@ func (s *EncounterStat) UpdatePredictabilityOnEncounter() {
 // contact for "units" time units:
 //
 //	P(a,b) = P(a,b)_old * Gamma^units
+//
+// Computed via math.Pow (O(1)) — a naive loop is O(units), which is fine in
+// the simulator (units are small) but pathological on the live mesh, where
+// units are real Unix seconds since the last encounter (billions of
+// iterations for a fresh stat).
 func (s *EncounterStat) AgePredictability(units int64) {
 	if units <= 0 {
 		return
 	}
-	r := 1.0
-	for i := int64(0); i < units; i++ {
-		r *= Gamma
-	}
-	s.Predictability *= r
+	s.Predictability *= math.Pow(Gamma, float64(units))
 	if s.Predictability < 1e-9 {
 		s.Predictability = 0
 	}

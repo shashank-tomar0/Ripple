@@ -18,23 +18,23 @@ import (
 type MessageType string
 
 const (
-	TypeChat         MessageType = "chat"         // Simple text chat message
-	TypeFile         MessageType = "file"         // File transfer (Phase 1+)
-	TypeSOS          MessageType = "sos"          // Emergency broadcast
-	TypeDeliveryAck  MessageType = "delivery_ack" // Delivery confirmation
-	TypePeerInfo     MessageType = "peer_info"    // Peer metadata exchange
-	TypeKeyExchange  MessageType = "key_exchange" // E2E key exchange
+	TypeChat        MessageType = "chat"         // Simple text chat message
+	TypeFile        MessageType = "file"         // File transfer (Phase 1+)
+	TypeSOS         MessageType = "sos"          // Emergency broadcast
+	TypeDeliveryAck MessageType = "delivery_ack" // Delivery confirmation
+	TypePeerInfo    MessageType = "peer_info"    // Peer metadata exchange
+	TypeKeyExchange MessageType = "key_exchange" // E2E key exchange
 )
 
 // DeliveryStatus represents the state of a message delivery.
 type DeliveryStatus string
 
 const (
-	DeliverySent      DeliveryStatus = "sent"       // Message published to mesh
-	DeliveryReceived  DeliveryStatus = "received"   // Recipient's node received it
-	DeliveryDelivered DeliveryStatus = "delivered"  // Recipient's app displayed it
-	DeliveryRead      DeliveryStatus = "read"       // Recipient opened/read it
-	DeliveryFailed    DeliveryStatus = "failed"     // Could not deliver
+	DeliverySent      DeliveryStatus = "sent"      // Message published to mesh
+	DeliveryReceived  DeliveryStatus = "received"  // Recipient's node received it
+	DeliveryDelivered DeliveryStatus = "delivered" // Recipient's app displayed it
+	DeliveryRead      DeliveryStatus = "read"      // Recipient opened/read it
+	DeliveryFailed    DeliveryStatus = "failed"    // Could not deliver
 )
 
 // DeliveryInfo is the payload for delivery-related messages.
@@ -54,7 +54,7 @@ type SOSUrgency string
 const (
 	SOSUrgencyLow      SOSUrgency = "low"
 	SOSUrgencyMedium   SOSUrgency = "medium"
-	SOSUrgencyHigh     SOSUrgency = "high"    // default
+	SOSUrgencyHigh     SOSUrgency = "high" // default
 	SOSUrgencyCritical SOSUrgency = "critical"
 )
 
@@ -68,7 +68,7 @@ type SOSPayload struct {
 	Accuracy    float64    `json:"accuracy,omitempty"` // meters
 	Timestamp   int64      `json:"ts"`
 	AutoExpire  int        `json:"expire_minutes"` // minutes until auto-expire (default 60)
-	AckRequired bool       `json:"ack_required"`  // true = sender needs delivery confirmation
+	AckRequired bool       `json:"ack_required"`   // true = sender needs delivery confirmation
 }
 
 // Message is the universal envelope for all Ripple mesh messages.
@@ -100,6 +100,17 @@ type Message struct {
 
 	// HopCount tracks how many relays this message has passed through.
 	HopCount int `json:"hops"`
+
+	// SprayBudget is the destination-aware routing copy budget: the maximum
+	// number of physical copies of this message allowed in the network
+	// (the original counts as one). 0 = unset → the message floods
+	// (epidemic re-broadcast), the pre-routing behavior.
+	SprayBudget int `json:"spray_budget,omitempty"`
+
+	// CopiesMade is how many physical copies of this message exist so far.
+	// Carried on the wire so every relay sees the same budget accounting.
+	// 0 (unset) is treated as 1 — the original copy.
+	CopiesMade int `json:"copies_made,omitempty"`
 
 	// Nonce is the NaCl encryption nonce (for E2E encrypted messages).
 	// Empty when the message is not encrypted.
@@ -140,13 +151,17 @@ func NewDeliveryAck(sender, ackForID, recipient string, status DeliveryStatus, h
 	}
 	payloadBytes, _ := json.Marshal(info)
 	return &Message{
-		ID:         newID(),
-		Type:       TypeDeliveryAck,
-		Sender:     sender,
-		Payload:    string(payloadBytes),
-		Timestamp:  time.Now().UnixNano(),
-		TTL:        4, // Delivery acks use shorter TTL
-		HopCount:   0,
+		ID:     newID(),
+		Type:   TypeDeliveryAck,
+		Sender: sender,
+		// A delivery receipt IS addressed to the original sender — the
+		// routing layer needs this on the envelope, not just inside the
+		// payload, or acks get treated as broadcasts and flooded.
+		Recipient: recipient,
+		Payload:   string(payloadBytes),
+		Timestamp: time.Now().UnixNano(),
+		TTL:       4, // Delivery acks use shorter TTL
+		HopCount:  0,
 	}
 }
 

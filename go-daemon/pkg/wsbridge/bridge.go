@@ -484,6 +484,7 @@ type relayEvent struct {
 	From    string `json:"from,omitempty"`
 	Hops    int    `json:"hops"`
 	TTL     int    `json:"ttl"`
+	Copies  int    `json:"copies"` // physical copies of the message, as known at this node
 	TS      int64  `json:"ts"`
 }
 
@@ -497,6 +498,7 @@ func (b *Bridge) broadcastRelay(evt mesh.RelayEvent) {
 		From:    evt.From,
 		Hops:    evt.Hops,
 		TTL:     evt.TTL,
+		Copies:  evt.Copies,
 		TS:      evt.Timestamp,
 	})
 	if err != nil {

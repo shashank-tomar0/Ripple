@@ -139,11 +139,28 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	n, err := mesh.NewNode(ctx, id.PrivKey, cfg.ListenPort,
+	// Destination-aware routing: "spray" installs the bounded-copy
+	// forwarder (shared with the research simulator); "epidemic" (default)
+	// keeps the historical flood.
+	nodeOpts := []mesh.Option{
 		mesh.WithDebug(cfg.Debug),
 		mesh.WithNickname(nickname),
 		mesh.WithMDNS(!cfg.NoMDNS),
-	)
+	}
+	if cfg.RoutingMode == "spray" {
+		nodeOpts = append(nodeOpts, mesh.WithSprayBudget(cfg.SprayBudget))
+	}
+
+	n, err := mesh.NewNode(ctx, id.PrivKey, cfg.ListenPort, nodeOpts...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Mesh error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg.RoutingMode == "spray" {
+		fmt.Printf("🧭 Routing: spray-and-wait (copy budget L=%d)\n", cfg.SprayBudget)
+	} else {
+		fmt.Printf("🧭 Routing: epidemic flood\n")
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Mesh error: %v\n", err)
 		os.Exit(1)
