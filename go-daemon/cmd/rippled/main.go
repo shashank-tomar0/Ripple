@@ -71,6 +71,36 @@ var (
 func main() {
 	cfg := config.Parse()
 
+	// Backup/restore modes run before anything else: they only touch the
+	// identity file and exit, so output stays clean and scriptable.
+	if cfg.ExportSeed {
+		id, err := identity.LoadOrCreate(cfg.IdentityPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Identity error: %v\n", err)
+			os.Exit(1)
+		}
+		phrase, err := id.ExportMnemonic()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Seed export error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(phrase)
+		return
+	}
+	if cfg.ImportSeed != "" {
+		restored, err := identity.FromMnemonic(cfg.ImportSeed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Seed import failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := identity.Save(cfg.IdentityPath, restored); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Could not save identity: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("🔑 Identity restored from backup phrase: %s\n", restored.PeerID.String())
+		return
+	}
+
 	fmt.Print(banner)
 	fmt.Printf("🔐 Starting Ripple...\n")
 
@@ -158,7 +188,7 @@ func main() {
 	fmt.Println()
 
 	// Start WebSocket bridge for Flutter app connectivity
-	bridge := wsbridge.NewBridge(n, id.PeerID.String(), nickname, cfg.WSPort, e2eManager)
+	bridge := wsbridge.NewBridge(n, id.PeerID.String(), nickname, cfg.WSPort, e2eManager, id)
 	if err := bridge.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ WebSocket bridge error: %v\n", err)
 		os.Exit(1)

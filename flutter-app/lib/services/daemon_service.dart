@@ -40,6 +40,10 @@ abstract class DaemonService {
   /// Sends our Curve25519 public key to [peerId] so E2E can be established.
   Future<bool> sendKeyExchange(String peerId);
 
+  /// Requests the node's 24-word BIP39 backup phrase from the daemon.
+  /// Returns null if the daemon is unreachable or refuses.
+  Future<String?> exportSeed();
+
   Stream<Message> get onMessage;
   Stream<FileTransfer> get onFileTransfer;
   Stream<Contact> get onPeerJoined;
@@ -75,6 +79,8 @@ class WebSocketDaemonService extends DaemonService {
   final _connectionController = StreamController<bool>.broadcast();
   final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
   final _relayEventController = StreamController<RelayEvent>.broadcast();
+  Completer<String>? _seedCompleter;
+
 
   @override
   bool get isConnected => _connected;
@@ -170,6 +176,16 @@ class WebSocketDaemonService extends DaemonService {
       case 'relay':
         _relayEventController.add(RelayEvent.fromJson(json));
         break;
+      case 'seed_export_reply':
+        _seedCompleter?.complete(json['mnemonic'] as String? ?? '');
+        _seedCompleter = null;
+        break;
+      case 'error':
+        _seedCompleter?.completeError(
+          Exception(json['payload'] as String? ?? 'daemon error'),
+        );
+        _seedCompleter = null;
+        break;
     }
   }
 
@@ -197,6 +213,24 @@ class WebSocketDaemonService extends DaemonService {
     } catch (e) {
       debugPrint('Key exchange send error: $e');
       return false;
+    }
+  }
+
+  @override
+  Future<String?> exportSeed() async {
+    if (!_connected || _channel == null) return null;
+    if (_seedCompleter != null) return null; // a request is already in flight
+
+    final completer = Completer<String>();
+    _seedCompleter = completer;
+    try {
+      _channel!.sink.add(jsonEncode({'type': 'seed_export'}));
+      return await completer.future.timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('Seed export failed: $e');
+      return null;
+    } finally {
+      if (_seedCompleter == completer) _seedCompleter = null;
     }
   }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/crypto"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/identity"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/mesh"
 )
@@ -57,6 +58,7 @@ type Bridge struct {
 	nickname   string
 	addr       string
 	e2eManager *crypto.Manager
+	identity   *identity.Identity
 
 	clients     map[*Client]bool
 	clientsMu   sync.RWMutex
@@ -116,7 +118,7 @@ type wsIncoming struct {
 // the mesh and WebSocket clients. The peerID and nickname identify the local
 // node to connecting clients. The e2eManager handles E2E encryption.
 // The bridge starts in the stopped state; call Start() to begin accepting connections.
-func NewBridge(node *mesh.Node, peerID, nickname string, port int, e2eManager *crypto.Manager) *Bridge {
+func NewBridge(node *mesh.Node, peerID, nickname string, port int, e2eManager *crypto.Manager, id *identity.Identity) *Bridge {
 	addr := fmt.Sprintf(":%d", port)
 	return &Bridge{
 		node:        node,
@@ -124,6 +126,7 @@ func NewBridge(node *mesh.Node, peerID, nickname string, port int, e2eManager *c
 		nickname:    nickname,
 		addr:        addr,
 		e2eManager:  e2eManager,
+		identity:    id,
 		clients:     make(map[*Client]bool),
 		peerNicknames: make(map[peer.ID]string),
 		log:         log.New(log.Writer(), "[wsbridge] ", log.LstdFlags),
@@ -740,6 +743,8 @@ func (c *Client) handleIncoming(data []byte) {
 		c.handleIncomingChat(incoming)
 	case "key_exchange":
 		c.handleIncomingKeyExchange(incoming)
+	case "seed_export":
+		c.handleSeedExport()
 	case "ping":
 		// Respond to client pings with a pong
 		c.sendPong()
@@ -823,6 +828,36 @@ func (c *Client) handleIncomingChat(incoming wsIncoming) {
 		c.bridge.log.Printf("send message error: %v", err)
 		c.sendError(fmt.Sprintf("send failed: %v", err))
 		return
+	}
+}
+
+// handleSeedExport replies to the requesting client with the node's BIP39
+// backup phrase. This is the only bridge operation that reveals the private
+// key material, so it is deliberately a request/response (never broadcast)
+// and the phrase goes only to the client that asked for it — the same trust
+// domain as the identity file itself.
+func (c *Client) handleSeedExport() {
+	if c.bridge.identity == nil {
+		c.sendError("identity not available")
+		return
+	}
+	phrase, err := c.bridge.identity.ExportMnemonic()
+	if err != nil {
+		c.bridge.log.Printf("seed export failed: %v", err)
+		c.sendError("seed export failed")
+		return
+	}
+	reply := map[string]string{
+		"type":     "seed_export_reply",
+		"mnemonic": phrase,
+	}
+	data, err := json.Marshal(reply)
+	if err != nil {
+		return
+	}
+	select {
+	case c.send <- data:
+	default:
 	}
 }
 

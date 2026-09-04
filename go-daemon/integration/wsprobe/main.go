@@ -11,10 +11,16 @@
 //	         the CI test greps the output for relay frames with specific
 //	         message IDs and actions.
 //
+//	seed   — request the node's BIP39 backup phrase over the bridge and
+//	         print it, exiting non-zero unless a valid 24-word phrase
+//	         arrives. Used to prove the app-facing backup path serves the
+//	         real identity key.
+//
 // Usage:
 //
 //	go run ./integration/wsprobe -mode send -url ws://localhost:9876/ws -payload "hello"
 //	go run ./integration/wsprobe -mode listen -url ws://localhost:9876/ws -timeout 8s > frames.jsonl
+//	go run ./integration/wsprobe -mode seed -url ws://localhost:9876/ws
 package main
 
 import (
@@ -22,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -47,8 +54,10 @@ func main() {
 		sendMode(conn, *payload, *recipient, *timeout)
 	case "listen":
 		listenMode(conn, *timeout)
+	case "seed":
+		seedMode(conn, *timeout)
 	default:
-		fmt.Fprintf(os.Stderr, "❌ unknown mode %q (want send|listen)\n", *mode)
+		fmt.Fprintf(os.Stderr, "❌ unknown mode %q (want send|listen|seed)\n", *mode)
 		os.Exit(1)
 	}
 }
@@ -89,6 +98,47 @@ func sendMode(conn *websocket.Conn, payload, recipient string, timeout time.Dura
 		}
 	}
 	fmt.Println("✅ probe finished, no bridge errors")
+}
+
+// seedMode requests the bridge's seed_export frame and validates the reply.
+// Prints the phrase on success; exits non-zero on any failure so scripts can
+// assert on the exit code.
+func seedMode(conn *websocket.Conn, timeout time.Duration) {
+	body, err := json.Marshal(map[string]string{"type": "seed_export"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ marshal seed_export: %v\n", err)
+		os.Exit(1)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, body); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ write seed_export: %v\n", err)
+		os.Exit(1)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ no seed_export_reply before deadline: %v\n", err)
+			os.Exit(1)
+		}
+		var frame map[string]interface{}
+		if json.Unmarshal(data, &frame) != nil {
+			continue
+		}
+		switch frame["type"] {
+		case "seed_export_reply":
+			phrase, _ := frame["mnemonic"].(string)
+			if len(strings.Fields(phrase)) != 24 {
+				fmt.Fprintf(os.Stderr, "❌ seed_export_reply is not 24 words: %q\n", phrase)
+				os.Exit(1)
+			}
+			fmt.Println(phrase)
+			return
+		case "error":
+			fmt.Fprintf(os.Stderr, "❌ bridge error: %v\n", frame["payload"])
+			os.Exit(1)
+		}
+	}
 }
 
 func listenMode(conn *websocket.Conn, timeout time.Duration) {

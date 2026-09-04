@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/app_state.dart';
 import '../services/foreground_service.dart';
 import '../services/local_storage_service.dart';
 
@@ -41,6 +42,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _backgroundService = prefs.getBool('background_service') ?? false;
       _maxHops = prefs.getInt('max_hops') ?? 16;
     });
+  }
+
+  /// Fetches the node's real BIP39 backup phrase from the daemon and shows
+  /// it in a dialog. No fake or locally-invented phrases: this is a live
+  /// request/response over the WebSocket bridge.
+  Future<void> _showBackupPhrase(BuildContext context) async {
+    final appState = context.read<AppState>();
+    final phrase = await appState.daemon.exportSeed();
+    if (!mounted) return;
+    if (phrase == null || phrase.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not fetch backup phrase — is the daemon connected?'),
+        ),
+      );
+      return;
+    }
+
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Your backup phrase'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SelectableText(
+                phrase,
+                style: const TextStyle(fontSize: 16, height: 1.5),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Write these 24 words down and store them safely. Anyone who '
+                'has them controls your identity — they can restore it on '
+                'another device, so never share them.',
+                style: Theme.of(dialogContext).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _savePreference(String key, dynamic value) async {
@@ -87,6 +138,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SnackBar(content: Text('Peer ID copied!')),
                 );
               },
+            ),
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: colorScheme.tertiaryContainer,
+                child: Icon(
+                  Icons.article_outlined,
+                  color: colorScheme.onTertiaryContainer,
+                ),
+              ),
+              title: const Text('Backup phrase'),
+              subtitle: const Text('24 words that restore your identity on any device'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showBackupPhrase(context),
             ),
           ),
           Card(

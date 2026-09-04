@@ -49,6 +49,15 @@ type Config struct {
 	// topologies (tests, relay chains) where peers must only connect
 	// through explicitly configured bootstrap addresses.
 	NoMDNS bool
+
+	// ExportSeed prints the identity's BIP39 backup phrase to stdout and
+	// exits without starting the daemon.
+	ExportSeed bool
+
+	// ImportSeed restores the identity file from a BIP39 backup phrase and
+	// exits without starting the daemon. The restored keypair is identical
+	// to the one on the device that produced the phrase.
+	ImportSeed string
 }
 
 // Parse parses CLI flags and returns a Config.
@@ -62,6 +71,8 @@ func Parse() *Config {
 	flag.StringVar(&c.DBPath, "db", "", "Persistent store path (JSON backup; default: ~/.ripple/ripple.db)")
 	flag.BoolVar(&c.Debug, "debug", false, "Enable debug logging")
 	flag.BoolVar(&c.NoMDNS, "nomdns", false, "Disable mDNS discovery (explicit bootstrap only)")
+	flag.BoolVar(&c.ExportSeed, "export-seed", false, "Print the identity's 24-word BIP39 backup phrase and exit")
+	flag.StringVar(&c.ImportSeed, "import-seed", "", "Restore identity from a BIP39 backup phrase and exit")
 
 	var dataDir string
 	flag.StringVar(&dataDir, "data", "", "Data directory (default: ~/.ripple)")

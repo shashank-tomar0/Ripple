@@ -165,6 +165,42 @@ ACK_B=$(grep -F "$MSG_B" "$WORK/node1_frames.jsonl" | grep '"type":"delivery_ack
 echo "$ACK_B" | grep -q '"status":"received"' || fail "delivery receipt for DM B is not 'received'"
 pass "delivery receipt (received) for $MSG_B travelled back to node1"
 
+# ── Phase C: identity recovery — a lost device must be recoverable ──
+echo "─── Phase C: BIP39 backup phrase restores the exact same identity ───"
+PHRASE=$("$RIPPLED" -data "$DATA1" -export-seed 2>&1) \
+  || fail "export-seed failed: $PHRASE"
+WORDS=$(echo "$PHRASE" | wc -w | tr -d ' ')
+[ "$WORDS" -eq 24 ] || fail "exported phrase has $WORDS words, want 24"
+
+echo "📤 exported 24-word phrase for $PEER1"
+
+DATA1R="$WORK_NATIVE/1-recovered"
+RESTORED=$("$RIPPLED" -data "$DATA1R" -import-seed "$PHRASE" 2>&1) \
+  || fail "import-seed failed: $RESTORED"
+echo "$RESTORED" | grep -qF "$PEER1" || fail "restored identity != node1: $RESTORED"
+[ -f "$DATA1R/identity.pem" ] || fail "import-seed did not write identity.pem"
+pass "identity recovered from phrase: $PEER1"
+
+# The restored identity file must export the SAME phrase (byte-identical key).
+PHRASE2=$("$RIPPLED" -data "$DATA1R" -export-seed 2>&1)
+[ "$PHRASE" = "$PHRASE2" ] || fail "restored identity exports a different phrase"
+pass "restored identity exports the identical phrase (key round-trips byte-identically)"
+
+# Garbage must be rejected loudly, not silently accepted.
+if "$RIPPLED" -data "$WORK_NATIVE/1-bad" -import-seed "abandon abandon abandon" >/dev/null 2>&1; then
+  fail "import-seed accepted a garbage phrase"
+fi
+pass "garbage backup phrase rejected with an error"
+
+# ── Phase D: the app-facing bridge serves the same phrase as the CLI ──
+echo "─── Phase D: seed_export over the bridge matches the CLI phrase ───"
+BRIDGE_PHRASE=$("$WSPROBE" -mode seed -url "ws://localhost:$W1/ws" -timeout 5s 2>&1) \
+  || fail "bridge seed_export failed: $BRIDGE_PHRASE"
+BRIDGE_WORDS=$(echo "$BRIDGE_PHRASE" | wc -w | tr -d ' ')
+[ "$BRIDGE_WORDS" -eq 24 ] || fail "bridge phrase has $BRIDGE_WORDS words, want 24"
+[ "$BRIDGE_PHRASE" = "$PHRASE" ] || fail "bridge phrase differs from the CLI phrase"
+pass "bridge seed_export serves the identical 24-word phrase as the CLI"
+
 # ── Wrap up ───────────────────────────────────────────────────────────
 echo
 echo "══════════════════════════════════════════════════════════════"
