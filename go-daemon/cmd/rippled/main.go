@@ -112,6 +112,7 @@ func main() {
 	n, err := mesh.NewNode(ctx, id.PrivKey, cfg.ListenPort,
 		mesh.WithDebug(cfg.Debug),
 		mesh.WithNickname(nickname),
+		mesh.WithMDNS(!cfg.NoMDNS),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Mesh error: %v\n", err)

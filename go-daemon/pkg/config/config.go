@@ -44,6 +44,11 @@ type Config struct {
 
 	// Debug enables verbose logging.
 	Debug bool
+
+	// NoMDNS disables mDNS peer discovery. Useful for deterministic
+	// topologies (tests, relay chains) where peers must only connect
+	// through explicitly configured bootstrap addresses.
+	NoMDNS bool
 }
 
 // Parse parses CLI flags and returns a Config.
@@ -56,6 +61,7 @@ func Parse() *Config {
 	flag.StringVar(&c.Nickname, "nick", "", "Display nickname")
 	flag.StringVar(&c.DBPath, "db", "", "Persistent store path (JSON backup; default: ~/.ripple/ripple.db)")
 	flag.BoolVar(&c.Debug, "debug", false, "Enable debug logging")
+	flag.BoolVar(&c.NoMDNS, "nomdns", false, "Disable mDNS discovery (explicit bootstrap only)")
 
 	var dataDir string
 	flag.StringVar(&dataDir, "data", "", "Data directory (default: ~/.ripple)")

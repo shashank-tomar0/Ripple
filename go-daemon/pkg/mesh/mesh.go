@@ -75,16 +75,51 @@ type Node struct {
 	OnPeerJoin  func(peer.ID)
 	OnPeerLeave func(peer.ID)
 
+	// OnRelay is invoked for every message that passes through this node,
+	// whether it was received, forwarded, or dropped. It feeds the live
+	// relay visualization and the delivery audit trail.
+	OnRelay func(RelayEvent)
+
+	// MDNSDisabled suppresses mDNS peer discovery when true (must be set
+	// via WithMDNS before Start). Peers then only appear via explicit
+	// ConnectToPeer dials — needed for deterministic test topologies.
+	MDNSDisabled bool
+
 	// Message relay
 	seenLock sync.RWMutex
 	seen     map[string]bool // dedup message IDs
 
-	// Delivery receipt manager
-	// ReceiptManager interface{} // placeholder for delivery receipts (to avoid import cycle)
-
 	// Logging
 	Debug bool
 	Log   *log.Logger
+}
+
+// RelayAction describes what happened to a message at this node.
+type RelayAction string
+
+const (
+	// RelayReceived: the message arrived at this node.
+	RelayReceived RelayAction = "received"
+	// RelayForwarded: this node relayed the message onward.
+	RelayForwarded RelayAction = "forwarded"
+	// RelayDropped: the message died here (TTL expired or duplicate).
+	RelayDropped RelayAction = "dropped"
+	// RelaySent: a locally-originated message was handed to the mesh.
+	RelaySent RelayAction = "sent"
+)
+
+// RelayEvent describes a message's passage through this node. Every field
+// is factual: the message ID, the action taken, the peer it came from
+// (empty for locally sent messages), and the message's hop/TTL state at
+// the moment of the event.
+type RelayEvent struct {
+	MessageID string
+	Type      message.MessageType
+	Action    RelayAction
+	From      string // peer this message arrived from; "" for local sends
+	Hops      int
+	TTL       int
+	Timestamp int64 // Unix nanoseconds
 }
 
 // Option configures a Node.
@@ -101,6 +136,14 @@ func WithDebug(enabled bool) Option {
 func WithNickname(nick string) Option {
 	return func(n *Node) {
 		n.Nick = nick
+	}
+}
+
+// WithMDNS controls mDNS peer discovery. Disable it for deterministic
+// topologies where peers must only arrive via explicit bootstrap dials.
+func WithMDNS(enabled bool) Option {
+	return func(n *Node) {
+		n.MDNSDisabled = !enabled
 	}
 }
 
@@ -195,8 +238,11 @@ func (n *Node) Start() error {
 	// Start pubsub message handler
 	go n.handlePubSub(sub)
 
-	// Start mDNS discovery
-	n.startMDNS()
+	// Start mDNS discovery (unless explicitly disabled for deterministic
+	// topologies such as relay-chain tests)
+	if !n.MDNSDisabled {
+		n.startMDNS()
+	}
 
 	if n.Debug {
 		n.Log.Printf("📡 PubSub topic: %s", PubSubTopic)
@@ -256,6 +302,15 @@ func (n *Node) SendMessage(msg *message.Message) error {
 		}
 		n.Log.Printf("📤 sending message %s (type: %s, to: %q)", shortID, msg.Type, msg.Recipient)
 	}
+
+	n.emitRelay(RelayEvent{
+		MessageID: msg.ID,
+		Type:      msg.Type,
+		Action:    RelaySent,
+		Hops:      0,
+		TTL:       msg.TTL,
+		Timestamp: time.Now().UnixNano(),
+	})
 
 	// If we have a specific recipient, try direct stream first
 	if msg.Recipient != "" {
@@ -333,7 +388,7 @@ func (n *Node) handleStream(s network.Stream) {
 		return
 	}
 
-	n.deliverMessage(msg)
+	n.deliverMessage(msg, pid.String())
 }
 
 // handlePubSub processes messages received from the GossipSub topic.
@@ -348,12 +403,12 @@ func (n *Node) handlePubSub(sub *pubsub.Subscription) {
 		}
 
 		// Record the relaying peer
-		relayPeer := pbMsg.ReceivedFrom.ShortString()
+		relayPeer := pbMsg.ReceivedFrom
 
 		msg, err := message.DeserializeMessage(pbMsg.Data)
 		if err != nil {
 			if n.Debug {
-				n.Log.Printf("invalid pubsub message from %s: %v", relayPeer, err)
+				n.Log.Printf("invalid pubsub message from %s: %v", relayPeer.ShortString(), err)
 			}
 			continue
 		}
@@ -368,23 +423,44 @@ func (n *Node) handlePubSub(sub *pubsub.Subscription) {
 				shortSender = shortSender[:8]
 			}
 			n.Log.Printf("📨 pubsub message %s from %s via %s (hops: %d)",
-				shortID, shortSender, relayPeer, msg.HopCount)
+				shortID, shortSender, relayPeer.ShortString(), msg.HopCount)
 		}
 
-		n.deliverMessage(msg)
+		n.deliverMessage(msg, relayPeer.String())
 	}
 }
 
 // deliverMessage processes and optionally relays an incoming message.
-func (n *Node) deliverMessage(msg *message.Message) {
+// The from parameter is the peer the message arrived through ("" if unknown).
+func (n *Node) deliverMessage(msg *message.Message, from string) {
 	// Dedup: skip if we've already seen this message
 	n.seenLock.Lock()
 	if n.seen[msg.ID] {
 		n.seenLock.Unlock()
+		n.emitRelay(RelayEvent{
+			MessageID: msg.ID,
+			Type:      msg.Type,
+			Action:    RelayDropped,
+			From:      from,
+			Hops:      msg.HopCount,
+			TTL:       msg.TTL,
+			Timestamp: time.Now().UnixNano(),
+		})
 		return
 	}
 	n.seen[msg.ID] = true
 	n.seenLock.Unlock()
+
+	// Emit the arrival event.
+	n.emitRelay(RelayEvent{
+		MessageID: msg.ID,
+		Type:      msg.Type,
+		Action:    RelayReceived,
+		From:      from,
+		Hops:      msg.HopCount,
+		TTL:       msg.TTL,
+		Timestamp: time.Now().UnixNano(),
+	})
 
 	// Add sender to known peers
 	senderPID, senderErr := peer.Decode(msg.Sender)
@@ -395,12 +471,35 @@ func (n *Node) deliverMessage(msg *message.Message) {
 	// Relay if TTL > 0 (store-and-forward)
 	if msg.TTL > 0 && (senderErr != nil || senderPID != n.Host.ID()) {
 		msg.DecrementTTL()
+		n.emitRelay(RelayEvent{
+			MessageID: msg.ID,
+			Type:      msg.Type,
+			Action:    RelayForwarded,
+			From:      from,
+			Hops:      msg.HopCount,
+			TTL:       msg.TTL,
+			Timestamp: time.Now().UnixNano(),
+		})
 		go func() {
+			if n.Topic == nil {
+				return // not started; nothing to relay onto
+			}
 			data, _ := msg.Serialize()
 			if err := n.Topic.Publish(n.ctx, data); err != nil && n.Debug {
 				n.Log.Printf("relay error: %v", err)
 			}
 		}()
+	} else if msg.TTL <= 0 && (senderErr != nil || senderPID != n.Host.ID()) {
+		// TTL exhausted: the message dies at this node.
+		n.emitRelay(RelayEvent{
+			MessageID: msg.ID,
+			Type:      msg.Type,
+			Action:    RelayDropped,
+			From:      from,
+			Hops:      msg.HopCount,
+			TTL:       msg.TTL,
+			Timestamp: time.Now().UnixNano(),
+		})
 	}
 
 	// Deliver to application layer
@@ -422,6 +521,12 @@ func (n *Node) deliverMessage(msg *message.Message) {
 	}
 }
 
+// emitRelay fires the OnRelay callback if one is registered.
+func (n *Node) emitRelay(evt RelayEvent) {
+	if n.OnRelay != nil {
+		n.OnRelay(evt)
+	}
+}
 // KnownPeers returns the list of peer IDs we've connected to.
 func (n *Node) KnownPeers() []peer.ID {
 	n.peerLock.RLock()

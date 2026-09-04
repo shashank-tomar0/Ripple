@@ -168,6 +168,15 @@ func (b *Bridge) Start() error {
 		b.handlePeerLeave(pid)
 	}
 
+	// Wrap existing OnRelay callback
+	origRelay := b.node.OnRelay
+	b.node.OnRelay = func(evt mesh.RelayEvent) {
+		if origRelay != nil {
+			origRelay(evt)
+		}
+		b.broadcastRelay(evt)
+	}
+
 	// Set up HTTP routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", b.handleWS)
@@ -460,6 +469,40 @@ func (b *Bridge) BroadcastFileNotification(msg *message.Message) {
 	b.broadcast(data)
 }
 
+// relayEvent is broadcast to WebSocket clients whenever a message passes
+// through the local mesh node. It powers the live topology visualization:
+// the app animates a message hop for every event, with the direction and
+// meaning taken directly from this factual data.
+type relayEvent struct {
+	Type    string `json:"type"`
+	MsgID   string `json:"msg_id"`
+	MsgType string `json:"msg_type"`
+	Action  string `json:"action"`
+	From    string `json:"from,omitempty"`
+	Hops    int    `json:"hops"`
+	TTL     int    `json:"ttl"`
+	TS      int64  `json:"ts"`
+}
+
+// broadcastRelay marshals and broadcasts a relay event to all clients.
+func (b *Bridge) broadcastRelay(evt mesh.RelayEvent) {
+	data, err := json.Marshal(relayEvent{
+		Type:    "relay",
+		MsgID:   evt.MessageID,
+		MsgType: string(evt.Type),
+		Action:  string(evt.Action),
+		From:    evt.From,
+		Hops:    evt.Hops,
+		TTL:     evt.TTL,
+		TS:      evt.Timestamp,
+	})
+	if err != nil {
+		b.log.Printf("relay event marshal error: %v", err)
+		return
+	}
+	b.broadcast(data)
+}
+
 // handlePeerJoin broadcasts a peer_join event to all WebSocket clients.
 func (b *Bridge) handlePeerJoin(pid peer.ID) {
 	nickname := b.getPeerNickname(pid)
@@ -695,6 +738,8 @@ func (c *Client) handleIncoming(data []byte) {
 	switch incoming.Type {
 	case "chat":
 		c.handleIncomingChat(incoming)
+	case "key_exchange":
+		c.handleIncomingKeyExchange(incoming)
 	case "ping":
 		// Respond to client pings with a pong
 		c.sendPong()
@@ -702,6 +747,39 @@ func (c *Client) handleIncoming(data []byte) {
 		c.bridge.log.Printf("unknown WS message type: %s", incoming.Type)
 		c.sendError(fmt.Sprintf("unknown message type: %s", incoming.Type))
 	}
+}
+
+// handleIncomingKeyExchange sends the local node's public key to a scanned
+// peer. The recipient is taken from the client frame; the sender is forced
+// to the local node's identity server-side (clients cannot spoof it).
+func (c *Client) handleIncomingKeyExchange(incoming wsIncoming) {
+	if c.bridge.e2eManager == nil {
+		c.bridge.log.Printf("key exchange requested but no E2E manager configured")
+		c.sendError("E2E not available on this node")
+		return
+	}
+	if incoming.Recipient == "" {
+		c.sendError("key_exchange requires a recipient")
+		return
+	}
+
+	msg := message.NewKeyExchange(
+		c.bridge.peerID,
+		c.bridge.nickname,
+		c.bridge.e2eManager.MyPublicKeyHex(),
+	)
+	msg.Recipient = incoming.Recipient
+
+	if err := c.bridge.node.SendMessage(msg); err != nil {
+		c.bridge.log.Printf("send key exchange error: %v", err)
+		c.sendError(fmt.Sprintf("send failed: %v", err))
+		return
+	}
+	short := incoming.Recipient
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	c.bridge.log.Printf("🔑 key exchange sent to %s…", short)
 }
 
 // handleIncomingChat processes a chat message from a WebSocket client and
