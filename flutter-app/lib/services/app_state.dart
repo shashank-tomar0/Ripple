@@ -11,6 +11,7 @@ import '../models/contact.dart';
 import '../models/file_transfer.dart';
 import '../models/sos_alert.dart';
 import '../models/delivery_receipt.dart';
+import '../models/relay_event.dart';
 import '../services/daemon_service.dart';
 import '../services/local_storage_service.dart';
 
@@ -24,8 +25,8 @@ class AppState extends ChangeNotifier {
   String _localPeerId = '';
   String _nickname = '';
   /// Known peers keyed by peer ID. Events from the daemon (peer_join /
-  /// peer_leave) are the source of truth; the getPeers() list endpoint is
-  /// only an optional initial snapshot.
+  /// peer_leave) and QR scans are the only sources — there is no list
+  /// endpoint to poll, and no fake data.
   final Map<String, Contact> _peersById = {};
   List<Message> _messages = [];
   List<Conversation> _conversations = [];
@@ -33,6 +34,11 @@ class AppState extends ChangeNotifier {
   List<SOSAlert> _activeAlerts = [];
   bool _loading = false;
   String? _error;
+
+  /// Most recent relay events from the daemon, newest first. Bounded so the
+  /// topology map only animates recent, real message traffic.
+  static const _maxRelayTrail = 80;
+  final List<RelayEvent> _relayTrail = [];
 
   /// Debounce timer for persisting state to local storage.
   Timer? _persistTimer;
@@ -64,6 +70,7 @@ class AppState extends ChangeNotifier {
   List<FileTransfer> get fileTransfers => _fileTransfers;
   List<SOSAlert> get activeAlerts => _activeAlerts;
   bool get hasActiveSOS => _activeAlerts.isNotEmpty;
+  List<RelayEvent> get relayTrail => List.unmodifiable(_relayTrail);
 
   // ── Lifecycle ──
   Future<void> init() async {
@@ -78,7 +85,8 @@ class AppState extends ChangeNotifier {
     _localPeerId = daemon.localPeerId;
     _nickname = daemon.nickname;
 
-    await _refreshPeers();
+    // Peers arrive as events; conversations are derived from the local
+    // message cache (the daemon serves neither as a list endpoint).
     await _refreshConversations();
 
     _loading = false;
@@ -214,6 +222,14 @@ class AppState extends ChangeNotifier {
 
     daemon.onDeliveryReceipt.listen((receipt) {
       handleDeliveryReceipt(receipt);
+    });
+
+    daemon.onRelayEvent.listen((event) {
+      _relayTrail.insert(0, event);
+      if (_relayTrail.length > _maxRelayTrail) {
+        _relayTrail.removeRange(_maxRelayTrail, _relayTrail.length);
+      }
+      notifyListeners();
     });
   }
 
@@ -406,10 +422,7 @@ class AppState extends ChangeNotifier {
   Future<void> refresh() async {
     _loading = true;
     notifyListeners();
-    await Future.wait([
-      _refreshPeers(),
-      _refreshConversations(),
-    ]);
+    await _refreshConversations();
     _loading = false;
     notifyListeners();
   }
@@ -435,11 +448,28 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  Future<void> _refreshPeers() async {
-    final fetched = await daemon.getPeers();
-    for (final c in fetched) {
-      _upsertPeer(c);
-    }
+  /// Registers a peer discovered by scanning their QR code. The data comes
+  /// from the scanned `ripple:` URI — peer ID, nickname, public key — and
+  /// nothing is invented. If a key was shared, E2E can be established.
+  Future<bool> connectToScannedPeer({
+    required String peerId,
+    required String nickname,
+    String publicKey = '',
+  }) async {
+    if (peerId.isEmpty || peerId == _localPeerId) return false;
+
+    _upsertPeer(Contact(
+      peerId: peerId,
+      nickname: nickname,
+      publicKey: publicKey.isEmpty ? null : publicKey,
+      isOnline: false, // presence arrives via peer_join from the daemon
+    ));
+    await _persistContacts();
+    notifyListeners();
+
+    // Ask the daemon to send our public key so the remote side can encrypt
+    // to us. Real network action — not a fake "connected" state.
+    return daemon.sendKeyExchange(peerId);
   }
 
   /// Conversations are derived locally from the message cache and known

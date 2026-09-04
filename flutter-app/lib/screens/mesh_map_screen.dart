@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../services/app_state.dart';
 import '../models/contact.dart';
+import '../models/relay_event.dart';
 
 /// Visualises the mesh network topology using a CustomPainter.
 ///
@@ -28,6 +29,13 @@ class _MeshMapScreenState extends State<MeshMapScreen>
   // Cached node positions, rebuilt when peers change.
   Map<String, Offset> _nodePositions = {};
   List<_MeshNode> _nodes = [];
+
+  // ── Live relay hops ──
+  // Every hop is spawned from a REAL relay event pushed by the daemon
+  // (message received / forwarded / dropped / sent). Nothing is synthetic.
+  static const _hopLifetime = Duration(milliseconds: 1600);
+  final Set<String> _seenEvents = {};
+  final List<_Hop> _hops = [];
 
   @override
   void initState() {
@@ -222,6 +230,35 @@ class _MeshMapScreenState extends State<MeshMapScreen>
     return '${diff.inDays}d ago';
   }
 
+  /// Spawns a visual hop for every relay event we have not yet rendered.
+  void _spawnHopsFromTrail(AppState appState, DateTime now) {
+    for (final evt in appState.relayTrail) {
+      if (_seenEvents.contains(evt.eventKey)) continue;
+      _seenEvents.add(evt.eventKey);
+      _hops.add(_Hop.fromEvent(evt, bornAt: now));
+    }
+    // Keep the seen-set bounded; on a rare overflow a few old events replay
+    // once, which is harmless.
+    if (_seenEvents.length > 600) _seenEvents.clear();
+    // Prune finished hops so the list stays bounded.
+    _hops.removeWhere(
+        (h) => now.difference(h.bornAt) > _hopLifetime);
+  }
+
+  /// Resolves the screen offset a hop should travel from or toward.
+  /// Unknown peers (e.g. a node we relayed from but never listed) start at
+  /// a deterministic point on the canvas edge, not a fabricated node.
+  Offset _resolvePosition(String? peerId, Offset center, Size size) {
+    if (peerId == null || peerId.isEmpty) return center;
+    final pos = _nodePositions[peerId];
+    if (pos != null) return pos;
+    // Deterministic angle from the peer ID hash.
+    final hash = peerId.codeUnits.fold<int>(0, (a, b) => (a * 31 + b) & 0xffff);
+    final angle = (hash % 360) * pi / 180;
+    final radius = size.shortestSide / 2 - 8;
+    return center + Offset(cos(angle), sin(angle)) * radius;
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
@@ -233,6 +270,12 @@ class _MeshMapScreenState extends State<MeshMapScreen>
     if (_nodes.isEmpty || _nodes.length != peers.length + 1) {
       _buildLayout(appState);
     }
+
+    final now = DateTime.now();
+    _spawnHopsFromTrail(appState, now);
+    final latestEvent = appState.relayTrail.isEmpty
+        ? null
+        : appState.relayTrail.first;
 
     // ── Empty state ──
     if (peers.isEmpty) {
@@ -325,6 +368,25 @@ class _MeshMapScreenState extends State<MeshMapScreen>
                   child: AnimatedBuilder(
                     animation: _pulseController,
                     builder: (context, _) {
+                      // Compute live hop visuals for this frame. Every hop
+                      // is a real relay event with a birth time; progress is
+                      // clock-driven so hops animate at frame rate.
+                      final frameNow = DateTime.now();
+                      final center = _nodePositions[_nodes.first.peerId];
+                      final hopVisuals = center == null
+                          ? const <_HopVisual>[]
+                          : _hops
+                              .map((h) => h.visualAt(
+                                    center: center,
+                                    size: size,
+                                    now: frameNow,
+                                    lifetime: _hopLifetime,
+                                    resolve: (p) =>
+                                        _resolvePosition(p, center, size),
+                                  ))
+                              .whereType<_HopVisual>()
+                              .toList();
+
                       return CustomPaint(
                         size: size,
                         painter: _MeshPainter(
@@ -333,6 +395,7 @@ class _MeshMapScreenState extends State<MeshMapScreen>
                           pulseValue: _pulseController.value,
                           colorScheme: colorScheme,
                           brightness: theme.brightness,
+                          hops: hopVisuals,
                         ),
                       );
                     },
@@ -342,6 +405,30 @@ class _MeshMapScreenState extends State<MeshMapScreen>
             },
           ),
         ),
+
+        // ── Live relay ticker: the last real mesh event ──
+        if (latestEvent != null && peers.isNotEmpty)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            color: colorScheme.surfaceVariant.withOpacity(0.25),
+            child: Row(
+              children: [
+                Icon(Icons.bolt, size: 12, color: colorScheme.primary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    latestEvent.describe(),
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      fontFamily: 'monospace',
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
 
         // ── Legend ──
         Container(
@@ -402,6 +489,117 @@ class _MeshNode {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Live relay hops
+// ═══════════════════════════════════════════════════════════════════
+
+/// A hop spawned from one real daemon relay event.
+class _Hop {
+  final String kind; // received | forwarded | dropped | sent
+  final String? fromPeer;
+  final DateTime bornAt;
+
+  _Hop({required this.kind, required this.fromPeer, required this.bornAt});
+
+  factory _Hop.fromEvent(RelayEvent evt, {required DateTime bornAt}) => _Hop(
+        kind: evt.action,
+        fromPeer: evt.from,
+        bornAt: bornAt,
+      );
+
+  /// Frame snapshot of this hop, or null once its lifetime has passed.
+  _HopVisual? visualAt({
+    required Offset center,
+    required Size size,
+    required DateTime now,
+    required Duration lifetime,
+    required Offset Function(String?) resolve,
+  }) {
+    final t = now.difference(bornAt).inMicroseconds /
+        lifetime.inMicroseconds;
+    if (t < 0 || t > 1) return null;
+
+    final eased = _easeOutCubic(t);
+    switch (kind) {
+      case 'received':
+        // A dot travels from the relaying peer to us (the centre).
+        final from = resolve(fromPeer);
+        return _HopVisual(
+          kind: kind,
+          dotFrom: from,
+          dotTo: center,
+          ringFrom: null,
+          ringTo: null,
+          progress: eased,
+        );
+      case 'sent':
+        // We handed a message to the mesh: it leaves the centre.
+        final to = fromPeer == null || fromPeer!.isEmpty
+            ? _edgePoint(center, size, 0)
+            : resolve(fromPeer);
+        return _HopVisual(
+          kind: kind,
+          dotFrom: center,
+          dotTo: to,
+          ringFrom: null,
+          ringTo: null,
+          progress: eased,
+        );
+      case 'forwarded':
+        // Re-broadcast: an expanding ring from the centre.
+        return _HopVisual(
+          kind: kind,
+          dotFrom: null,
+          dotTo: null,
+          ringFrom: center,
+          ringTo: _edgePoint(center, size, 1.5),
+          progress: eased,
+        );
+      case 'dropped':
+        // The message died here: a contracting red ring.
+        return _HopVisual(
+          kind: kind,
+          dotFrom: null,
+          dotTo: null,
+          ringFrom: center,
+          ringTo: center + const Offset(0, 6),
+          progress: eased,
+        );
+      default:
+        return null;
+    }
+  }
+
+  /// A point at [frac] of the distance from [center] to the canvas edge
+  /// at [angle] radians (deterministic per call site).
+  Offset _edgePoint(Offset center, Size size, double angle) {
+    final radius = size.shortestSide / 2 - 6;
+    return center +
+        Offset(cos(angle * 2.094), sin(angle * 2.094)) * radius;
+  }
+}
+
+/// Per-frame visual state of a hop, resolved to concrete geometry.
+class _HopVisual {
+  final String kind;
+  final Offset? dotFrom;
+  final Offset? dotTo;
+  final Offset? ringFrom;
+  final Offset? ringTo;
+  final double progress; // 0..1 eased
+
+  _HopVisual({
+    required this.kind,
+    required this.dotFrom,
+    required this.dotTo,
+    required this.ringFrom,
+    required this.ringTo,
+    required this.progress,
+  });
+}
+
+double _easeOutCubic(double t) => 1 - pow(1 - t, 3);
+
+// ═══════════════════════════════════════════════════════════════════
 // CustomPainter — draws nodes, edges, labels
 // ═══════════════════════════════════════════════════════════════════
 
@@ -411,6 +609,7 @@ class _MeshPainter extends CustomPainter {
   final double pulseValue;
   final ColorScheme colorScheme;
   final Brightness brightness;
+  final List<_HopVisual> hops;
 
   _MeshPainter({
     required this.nodes,
@@ -418,12 +617,62 @@ class _MeshPainter extends CustomPainter {
     required this.pulseValue,
     required this.colorScheme,
     required this.brightness,
+    this.hops = const [],
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     _drawEdges(canvas);
     _drawNodes(canvas);
+    _drawHops(canvas);
+  }
+
+  /// Draws the live message traffic. Every visual corresponds to one real
+  /// relay event from the daemon — nothing here is decorative fiction.
+  void _drawHops(Canvas canvas) {
+    for (final h in hops) {
+      switch (h.kind) {
+        case 'received':
+          _drawTravelDot(canvas, h.dotFrom ?? Offset.zero,
+              h.dotTo ?? Offset.zero, h.progress, colorScheme.primary);
+        case 'sent':
+          _drawTravelDot(canvas, h.dotFrom ?? Offset.zero,
+              h.dotTo ?? Offset.zero, h.progress, colorScheme.secondary);
+        case 'forwarded':
+          _drawRing(canvas, h.ringFrom ?? Offset.zero,
+              h.ringTo ?? Offset.zero, h.progress, colorScheme.primary, false);
+        case 'dropped':
+          _drawRing(canvas, h.ringFrom ?? Offset.zero,
+              h.ringTo ?? Offset.zero, h.progress, colorScheme.error, true);
+      }
+    }
+  }
+
+  void _drawTravelDot(Canvas canvas, Offset from, Offset to, double t,
+      Color color) {
+    final pos = Offset.lerp(from, to, t)!;
+    // Fade out over the last third of the trip.
+    final alpha = t < 0.7 ? 1.0 : (1 - t) / 0.3;
+    final paint = Paint()
+      ..color = color.withOpacity(0.9 * alpha)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(pos, 5, paint);
+    // Soft glow behind the dot.
+    final glow = Paint()
+      ..color = color.withOpacity(0.35 * alpha)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(pos, 11, glow);
+  }
+
+  void _drawRing(Canvas canvas, Offset from, Offset to, double t, Color color,
+      bool contracting) {
+    final radius = Offset.lerp(from, to, t)!.distance;
+    final alpha = contracting ? t : (1 - t);
+    final paint = Paint()
+      ..color = color.withOpacity(0.6 * alpha)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5;
+    canvas.drawCircle(from, radius, paint);
   }
 
   void _drawEdges(Canvas canvas) {
@@ -593,5 +842,6 @@ class _MeshPainter extends CustomPainter {
   bool shouldRepaint(_MeshPainter old) =>
       old.pulseValue != pulseValue ||
       old.nodes != nodes ||
-      old.positions != positions;
+      old.positions != positions ||
+      old.hops != hops;
 }

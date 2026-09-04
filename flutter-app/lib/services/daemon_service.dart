@@ -1,17 +1,18 @@
-// Package models defines the data types shared across the Ripple Flutter app.
-// These mirror the Go daemon's message types for seamless serialization.
+// Package services provides communication with the Ripple Go daemon.
+// The only transport is the real WebSocket bridge — there is no fake or
+// demo mode. If the daemon is unreachable the app reports disconnected;
+// it never invents peers, messages, or receipts.
 library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
-import '../utils/time.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
 import '../models/delivery_receipt.dart';
+import '../models/relay_event.dart';
 
 /// Callback types for daemon events.
 typedef MessageCallback = void Function(Message message);
@@ -20,6 +21,11 @@ typedef ConnectionCallback = void Function(bool connected);
 typedef DeliveryReceiptCallback = void Function(DeliveryReceipt receipt);
 
 /// Abstract interface for daemon communication.
+///
+/// Note: the daemon deliberately has no "list peers/conversations/messages"
+/// endpoints over the wire. Peer presence arrives as events, and message
+/// history is derived locally by [AppState]. The interface therefore only
+/// exposes what the daemon genuinely serves.
 abstract class DaemonService {
   bool get isConnected;
   String get localPeerId;
@@ -30,9 +36,9 @@ abstract class DaemonService {
   Future<void> disconnect();
 
   Future<bool> sendMessage(Message message);
-  Future<List<Contact>> getPeers();
-  Future<List<Conversation>> getConversations();
-  Future<List<Message>> getMessages(String peerId);
+
+  /// Sends our Curve25519 public key to [peerId] so E2E can be established.
+  Future<bool> sendKeyExchange(String peerId);
 
   Stream<Message> get onMessage;
   Stream<FileTransfer> get onFileTransfer;
@@ -40,9 +46,10 @@ abstract class DaemonService {
   Stream<Contact> get onPeerLeft;
   Stream<bool> get onConnectionState;
   Stream<DeliveryReceipt> get onDeliveryReceipt;
+  Stream<RelayEvent> get onRelayEvent;
 }
 
-/// WebSocket implementation — connects to the Ripple Go daemon.
+/// WebSocket implementation — connects to the Ripple Go daemon's bridge.
 class WebSocketDaemonService extends DaemonService {
   final String _defaultHost;
   final int _defaultPort;
@@ -67,6 +74,7 @@ class WebSocketDaemonService extends DaemonService {
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
   final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
+  final _relayEventController = StreamController<RelayEvent>.broadcast();
 
   @override
   bool get isConnected => _connected;
@@ -159,6 +167,9 @@ class WebSocketDaemonService extends DaemonService {
       case 'delivery_ack':
         _deliveryReceiptController.add(DeliveryReceipt.fromJson(json));
         break;
+      case 'relay':
+        _relayEventController.add(RelayEvent.fromJson(json));
+        break;
     }
   }
 
@@ -175,222 +186,18 @@ class WebSocketDaemonService extends DaemonService {
   }
 
   @override
-  Future<List<Contact>> getPeers() async => [];
-
-  @override
-  Future<List<Conversation>> getConversations() async => [];
-
-  @override
-  Future<List<Message>> getMessages(String peerId) async => [];
-
-  @override
-  Stream<Message> get onMessage => _messageController.stream;
-
-  @override
-  Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
-
-  @override
-  Stream<Contact> get onPeerJoined => _peerJoinController.stream;
-
-  @override
-  Stream<Contact> get onPeerLeft => _peerLeaveController.stream;
-
-  @override
-  Stream<bool> get onConnectionState => _connectionController.stream;
-
-  @override
-  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
-}
-
-/// Local demo service — generates fake messages for UI development.
-class LocalDaemonService extends DaemonService {
-  bool _connected = false;
-  final _messageController = StreamController<Message>.broadcast();
-  final _fileTransferController = StreamController<FileTransfer>.broadcast();
-  final _peerJoinController = StreamController<Contact>.broadcast();
-  final _peerLeaveController = StreamController<Contact>.broadcast();
-  final _connectionController = StreamController<bool>.broadcast();
-  final _deliveryReceiptController = StreamController<DeliveryReceipt>.broadcast();
-
-  final _contacts = <Contact>[
-    Contact(peerId: '12D3KooW9a…v1x2', nickname: 'Alice', isOnline: true, hopCount: 0),
-    Contact(peerId: '12D3KooW8b…q3w4', nickname: 'Bob', isOnline: true, hopCount: 1),
-    Contact(peerId: '12D3KooW7c…r5t6', nickname: 'Carol', isOnline: false, hopCount: 2),
-  ];
-
-  final _messages = <String, List<Message>>{};
-  final _rand = Random(42);
-
-  @override
-  bool get isConnected => _connected;
-
-  @override
-  String get localPeerId => '12D3KooW0demo1234567';
-
-  @override
-  String get nickname => 'You';
-
-  @override
-  String get localPubKey => 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-
-  @override
-  Future<bool> connect({String? host, int? port}) async {
-    _connected = true;
-    _connectionController.add(true);
-    _peerJoinController.add(_contacts[0]);
-    _peerJoinController.add(_contacts[1]);
-    return true;
-  }
-
-  @override
-  Future<void> disconnect() async {
-    _connected = false;
-    _connectionController.add(false);
-  }
-
-  @override
-  Future<bool> sendMessage(Message message) async {
-    _messages.putIfAbsent(
-        message.recipient ?? 'broadcast', () => []);
-    _messages[message.recipient ?? 'broadcast']!.insert(0, message);
-    message.isSent = true;
-    _messageController.add(message);
-
-    // Simulate delivery receipts: sent -> delivered -> read
-    if (message.recipient != null) {
-      // "sent" is immediate
-      _deliveryReceiptController.add(DeliveryReceipt(
-        messageId: message.id,
-        status: DeliveryStatus.sent,
-        timestamp: unixNanosNow(),
-      ));
-
-      // "delivered" after 0.5-1 second
-      Future.delayed(Duration(milliseconds: 500 + _rand.nextInt(500)), () {
-        _deliveryReceiptController.add(DeliveryReceipt(
-          messageId: message.id,
-          status: DeliveryStatus.delivered,
-          hops: 1 + _rand.nextInt(3),
-          timestamp: unixNanosNow(),
-        ));
-      });
-
-      // "read" after 2-5 seconds
-      Future.delayed(Duration(seconds: 2 + _rand.nextInt(3)), () {
-        _deliveryReceiptController.add(DeliveryReceipt(
-          messageId: message.id,
-          status: DeliveryStatus.read,
-          hops: 1 + _rand.nextInt(3),
-          timestamp: unixNanosNow(),
-        ));
-      });
-
-      // Simulate a reply after 1-2 seconds
-      Future.delayed(Duration(seconds: 1 + _rand.nextInt(2)), () {
-        final reply = Message(
-          id: DateTime.now().microsecondsSinceEpoch.toString(),
-          type: 'chat',
-          sender: message.recipient!,
-          senderNick: _contacts
-                  .where((c) => c.peerId == message.recipient)
-                  .firstOrNull
-                  ?.nickname ??
-              'Unknown',
-          recipient: localPeerId,
-          payload: _randomReply(),
-          timestamp: unixNanosNow(),
-        );
-        _messages.putIfAbsent(reply.sender, () => []);
-        _messages[reply.sender]!.insert(0, reply);
-        _messageController.add(reply);
-      });
-    }
-
-    // Simulate file transfer progress if this is a file message
-    if (message.isFile && message.recipient != null) {
-      _simulateFileTransfer(message);
-    }
-
-    return true;
-  }
-
-  void _simulateFileTransfer(Message message) {
-    String fileName;
-    int fileSize;
-    String mimeType;
+  Future<bool> sendKeyExchange(String peerId) async {
+    if (!_connected || _channel == null || peerId.isEmpty) return false;
     try {
-      final meta = jsonDecode(message.payload);
-      fileName = meta['file_name'] as String? ?? 'unknown_file.bin';
-      fileSize = meta['file_size'] as int? ?? 1048576;
-      mimeType = meta['mime_type'] as String? ?? 'application/octet-stream';
-    } catch (_) {
-      fileName = message.payload;
-      fileSize = 1048576;
-      mimeType = 'application/octet-stream';
+      _channel!.sink.add(jsonEncode({
+        'type': 'key_exchange',
+        'recipient': peerId,
+      }));
+      return true;
+    } catch (e) {
+      debugPrint('Key exchange send error: $e');
+      return false;
     }
-
-    final ft = FileTransfer(
-      fileId: message.id,
-      fileName: fileName,
-      fileSize: fileSize,
-      mimeType: mimeType,
-      sender: message.sender,
-      senderNick: message.senderNick,
-      recipient: message.recipient,
-      timestamp: message.timestamp,
-      status: FileTransferStatus.sending,
-      isIncoming: false,
-    );
-    _fileTransferController.add(ft);
-
-    // Simulate progress updates
-    final steps = 5;
-    for (var i = 1; i <= steps; i++) {
-      Future.delayed(Duration(milliseconds: 300 * i), () {
-        final progress = i / steps;
-        ft.status = i < steps
-            ? FileTransferStatus.sending
-            : FileTransferStatus.complete;
-        ft.progress = progress;
-        _fileTransferController.add(ft);
-      });
-    }
-  }
-
-  String _randomReply() {
-    final replies = [
-      'Got it! 👋',
-      'That works for me',
-      'Where are you right now?',
-      'Can you send that again?',
-      '👍',
-      'Sure, on my way!',
-      'Haha 😄',
-      'Let me check and get back to you',
-      'Perfect timing!',
-      'I\'ll be there in 5',
-    ];
-    return replies[_rand.nextInt(replies.length)];
-  }
-
-  @override
-  Future<List<Contact>> getPeers() async => _contacts;
-
-  @override
-  Future<List<Conversation>> getConversations() async {
-    return _contacts.map((c) {
-      final msgs = _messages[c.peerId] ?? [];
-      return Conversation(
-        contact: c,
-        lastMessage: msgs.isNotEmpty ? msgs.first : null,
-        unreadCount: msgs.where((m) => !m.isSent && m.isIncoming).length,
-      );
-    }).toList();
-  }
-
-  @override
-  Future<List<Message>> getMessages(String peerId) async {
-    return _messages[peerId] ?? [];
   }
 
   @override
@@ -409,5 +216,9 @@ class LocalDaemonService extends DaemonService {
   Stream<bool> get onConnectionState => _connectionController.stream;
 
   @override
-  Stream<DeliveryReceipt> get onDeliveryReceipt => _deliveryReceiptController.stream;
+  Stream<DeliveryReceipt> get onDeliveryReceipt =>
+      _deliveryReceiptController.stream;
+
+  @override
+  Stream<RelayEvent> get onRelayEvent => _relayEventController.stream;
 }

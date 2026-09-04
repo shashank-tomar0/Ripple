@@ -182,17 +182,50 @@ class _QRScreenState extends State<QRScreen> {
             label: const Text('Connect'),
             onPressed: () {
               Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Connected to $nickname!')),
-              );
-              // TODO: Send key exchange message with our public key
-              // For now just pop back to the previous screen.
-              Navigator.pop(context, {'peerId': peerId, 'pubKey': peerPubKey});
+              _performConnect(peerId, nickname, peerPubKey);
             },
           ),
         ],
       ),
     );
+  }
+
+  /// Connects to a scanned peer for real: records the contact locally
+  /// (from the scanned QR data — nothing invented) and asks the daemon to
+  /// send our Curve25519 public key so E2E can be established with them.
+  Future<void> _performConnect(
+      String peerId, String nickname, String peerPubKey) async {
+    final appState = context.read<AppState>();
+    final scaffold = ScaffoldMessenger.of(context);
+
+    if (peerId == appState.localPeerId) {
+      scaffold.showSnackBar(const SnackBar(
+        content: Text('That is your own QR code'),
+      ));
+      setState(() => _isScanning = true);
+      _resumeScanner();
+      return;
+    }
+
+    final sent = await appState.connectToScannedPeer(
+      peerId: peerId,
+      nickname: nickname,
+      publicKey: peerPubKey,
+    );
+
+    if (!mounted) return;
+    if (sent) {
+      scaffold.showSnackBar(SnackBar(
+        content: Text('Contact saved — key exchange sent to $nickname'),
+      ));
+    } else {
+      scaffold.showSnackBar(SnackBar(
+        content: Text(
+          'Contact saved, but the mesh daemon is unreachable — '
+          'E2E key exchange could not be sent yet',
+        ),
+      ));
+    }
   }
 
   void _showErrorDialog(String rawValue) {
