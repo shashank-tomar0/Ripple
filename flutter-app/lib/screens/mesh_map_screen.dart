@@ -597,7 +597,7 @@ class _HopVisual {
   });
 }
 
-double _easeOutCubic(double t) => 1 - pow(1 - t, 3);
+double _easeOutCubic(double t) => 1 - pow(1 - t, 3).toDouble();
 
 // ═══════════════════════════════════════════════════════════════════
 // CustomPainter — draws nodes, edges, labels
