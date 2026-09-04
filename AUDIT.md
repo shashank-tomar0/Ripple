@@ -116,9 +116,37 @@ spray decision matrix; `sim/sim_test.go` asserts determinism (same seed,
 same byte-for-byte outcome), sanity bounds, the multi-seed
 "spray delivers ≥60% of epidemic with ≤60% of its copies" invariant, and
 the L=5 budget cap; the bench's gate runs in CI.
-**Proof gap (honest):** this decides *in simulation* — the live mesh still
-floods. Wiring the forwarder into the mesh's forwarding path is the next
-milestone, tracked below.
+
+### 1.11b Routing ON the live wire — 🟢
+The forwarder now runs in the mesh's real forwarding path, not just the
+simulator. `rippled -routing spray -spray-budget L` routes addressed
+messages hop-by-hop over direct streams with at most L physical copies; the
+budget travels on the wire (`spray_budget`/`copies_made` fields), and
+relay events carry the observed copy count so the bound is externally
+verifiable. Broadcasts (no recipient) and budget-less nodes keep the
+epidemic flood unchanged. Three real bugs were found and fixed while wiring
+this:
+
+1. **`NewDeliveryAck` never set `msg.Recipient`** — delivery receipts were
+   silently treated as broadcasts and flooded (invisible under epidemic;
+   fatal for routing).
+2. **Peers were removed from `KnownPeers` when a stream closed** even
+   though the connection stayed up — direct-stream routing would "lose"
+   peers after one message (invisible under pubsub).
+3. **A peer that dials us was not dialable back** (no address in our
+   peerstore until Identify ran) — the connection notifiee now records the
+   remote address.
+4. **`AgePredictability` aged in a loop** — O(units), fine in the simulator
+   but 1.7-billion iterations for a fresh live stat (units = real Unix
+   seconds). Now `math.Pow`, O(1).
+
+**Proof:** `mesh/routing_test.go` runs real nodes and asserts the budget on
+the wire: a chain DM (L=2) arrives at the destination with `CopiesMade==2`
+and no ping-pong back-send; a star DM (L=1) never reaches the spur node.
+Integration Phase E runs a 4-node live topology in spray mode: the DM
+delivers through the relay, the receipt round-trips, e3's relay event shows
+`copies:2`, and the spur node — which epidemic flooding would have touched
+— receives nothing.
 
 ## 2. Flutter app (`flutter-app`)
 
@@ -166,7 +194,7 @@ Single wire convention: Unix **nanoseconds** everywhere, via
 |---|---|---|
 | Go build + vet + race tests | `make go-check` | local + CI |
 | Flutter analyze + tests + APK | CI job `flutter-app` | CI |
-| 3-node mesh delivery (multi-hop through a middle node) | `make integration` | local + CI |
+| 5-phase integration: 3-node relay chain + identity recovery + bridge seed + 4-node spray routing | `make integration` | local + CI |
 | Routing benchmark (claims gate) | `make bench` | local + CI |
 | Docker image boots cleanly | CI job `docker-build` | CI |
 
@@ -179,7 +207,7 @@ Every check must pass on `main`. There are no `|| true` escapes anywhere.
 | App ↔ daemon on real hardware | ⚫ | Device/emulator smoke test (first milestone) |
 | SQLite/durable store | ⚫ | Phase 5, after routing |
 | BLE / Wi-Fi Aware / LoRa transports | ⚫ | Deferred; LAN first |
-| Smart routing (spray-and-wait, PROPHET) | 🟡 | Decision layer + simulator + benchmark proven; **not yet wired into the live mesh** — wire the forwarder into `mesh.go`'s forwarding path with a per-message budget |
+| Smart routing (spray-and-wait, PROPHET) | 🟢 | Live wire (Phase E, `-routing spray`) + simulator + benchmark; PROPHET handoff on the live wire needs predictability-vector exchange (next slice) |
 | ~~Identity seed-phrase backup~~ | 🟢 done | CLI + bridge + app dialog; phases C & D assert it end-to-end |
 | Automatic re-send on delivery failure | ⚫ | Phase 3 store-and-forward, with benchmark |
 | End-to-end file transfer test | ⚫ | Requires devices |
@@ -187,4 +215,4 @@ Every check must pass on `main`. There are no `|| true` escapes anywhere.
 
 ---
 
-*Last updated: 2026-09-04. Update this file whenever a status changes.*
+*Last updated: 2026-09-05. Update this file whenever a status changes.*

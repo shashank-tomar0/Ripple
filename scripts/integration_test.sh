@@ -28,25 +28,25 @@ WORK="$(mktemp -d)"
 # Native tools (go, rippled) need a Windows path on Git Bash; convert it.
 # On Linux/macOS cygpath does not exist and WORK is already native.
 WORK_NATIVE="$(cygpath -w "$WORK" 2>/dev/null || echo "$WORK")"
-NODE1_PID="" NODE2_PID="" NODE3_PID="" PROBE_PID=""
+NODE1_PID="" NODE2_PID="" NODE3_PID="" NODE4_PID="" PROBE_PID=""
 
 cleanup() {
-  [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null || true
+  [ -n "$PROBE_PID" ] && kill $PROBE_PID 2>/dev/null || true
   # Signal the daemons, then WAIT for them to exit and flush before
   # removing their data dirs — otherwise rm can race a still-running node
   # that is writing into its directory (a real CI failure we hit).
-  for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+  for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID" "$NODE4_PID"; do
     [ -n "$p" ] && kill "$p" 2>/dev/null || true
   done
   for _ in 1 2 3 4 5; do
     alive=""
-    for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+    for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID" "$NODE4_PID"; do
       [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive="$alive $p"
     done
     [ -n "$alive" ] || break
     sleep 1
   done
-  for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+  for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID" "$NODE4_PID"; do
     [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
   done
   rm -rf "$WORK" 2>/dev/null || { sleep 1; rm -rf "$WORK" 2>/dev/null || true; }
@@ -214,6 +214,128 @@ BRIDGE_WORDS=$(echo "$BRIDGE_PHRASE" | wc -w | tr -d ' ')
 [ "$BRIDGE_WORDS" -eq 24 ] || fail "bridge phrase has $BRIDGE_WORDS words, want 24"
 [ "$BRIDGE_PHRASE" = "$PHRASE" ] || fail "bridge phrase differs from the CLI phrase"
 pass "bridge seed_export serves the identical 24-word phrase as the CLI"
+
+# ── Phase E: destination-aware routing (spray-and-wait) on the wire ──
+# Fresh 4-node topology in spray mode: e1↔e2↔e3 chain plus spur e2↔e4.
+# e3 is reachable only through e2; e4 is a node that epidemic flooding
+# would hand a copy to, but bounded-copy routing must skip. The DM must
+# deliver through the same relay path as Phase B, with the copy budget
+# observable on the wire (copies=2) and the spur untouched.
+echo "─── Phase E: spray routing — same delivery, bounded copies ───"
+# Stop the epidemic-phase daemons first (they reuse the PID variables).
+for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID"; do
+  [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  [ -n "$p" ] && wait "$p" 2>/dev/null || true
+  [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
+done
+NODE1_PID=""; NODE2_PID=""; NODE3_PID=""
+sleep 1
+
+PE1=19411; PE2=19412; PE3=19413; PE4=19414
+WE1=19881; WE2=19882; WE3=19883; WE4=19884
+SPRAY="-routing spray -spray-budget 2"
+
+"$RIPPLED" -port $PE1 -wsport $WE1 -data "$WORK_NATIVE/E1" -nick e1 -debug -nomdns $SPRAY \
+  >"$WORK/e1.log" 2>&1 &
+NODE1_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Mesh peer ID" "$WORK/e1.log" && break
+  [ "$i" -eq 30 ] && fail "e1 never started: $(tail -20 "$WORK/e1.log")"
+  sleep 1
+done
+PEER_E1=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/e1.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+[ -n "$PEER_E1" ] || fail "could not parse e1 peer ID"
+grep -q "spray-and-wait" "$WORK/e1.log" || fail "e1 did not enable spray routing"
+pass "e1 up with spray-and-wait (L=2)"
+
+"$RIPPLED" -port $PE2 -wsport $WE2 -data "$WORK_NATIVE/E2" -nick e2 -debug -nomdns $SPRAY \
+  -peers "/ip4/127.0.0.1/tcp/$PE1/p2p/$PEER_E1" >"$WORK/e2.log" 2>&1 &
+NODE2_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Peer connected" "$WORK/e2.log" && break
+  [ "$i" -eq 30 ] && fail "e2 never joined: $(tail -20 "$WORK/e2.log")"
+  sleep 1
+done
+PEER_E2=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/e2.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+pass "e2 up (dialed e1)"
+
+"$RIPPLED" -port $PE3 -wsport $WE3 -data "$WORK_NATIVE/E3" -nick e3 -debug -nomdns $SPRAY \
+  -peers "/ip4/127.0.0.1/tcp/$PE2/p2p/$PEER_E2" >"$WORK/e3.log" 2>&1 &
+NODE3_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Peer connected" "$WORK/e3.log" && break
+  [ "$i" -eq 30 ] && fail "e3 never joined: $(tail -20 "$WORK/e3.log")"
+  sleep 1
+done
+PEER_E3=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/e3.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+pass "e3 up (dialed e2 only — e1↔e3 NOT connected)"
+
+"$RIPPLED" -port $PE4 -wsport $WE4 -data "$WORK_NATIVE/E4" -nick e4 -debug -nomdns $SPRAY \
+  -peers "/ip4/127.0.0.1/tcp/$PE2/p2p/$PEER_E2" >"$WORK/e4.log" 2>&1 &
+NODE4_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Peer connected" "$WORK/e4.log" && break
+  [ "$i" -eq 30 ] && fail "e4 never joined: $(tail -20 "$WORK/e4.log")"
+  sleep 1
+done
+pass "e4 up (spur node on e2 — flood would hand it a copy)"
+
+# Give GossipSub time to graft (broadcasts still ride pubsub) and the
+# connection ledger time to settle.
+sleep 3
+
+PAYLOAD_E="ripple-spray-e-$(date +%s)"
+"$WSPROBE" -mode listen -url "ws://localhost:$WE1/ws" -timeout 15s \
+  >"$WORK/e1_frames.jsonl" 2>"$WORK/probe_e1.err" &
+PROBE1_PID=$!
+"$WSPROBE" -mode listen -url "ws://localhost:$WE3/ws" -timeout 15s \
+  >"$WORK/e3_frames.jsonl" 2>"$WORK/probe_e3.err" &
+PROBE2_PID=$!
+"$WSPROBE" -mode listen -url "ws://localhost:$WE4/ws" -timeout 15s \
+  >"$WORK/e4_frames.jsonl" 2>"$WORK/probe_e4.err" &
+PROBE3_PID=$!
+PROBE_PID="$PROBE1_PID $PROBE2_PID $PROBE3_PID"
+sleep 1  # let the probes connect and receive identity
+
+"$WSPROBE" -mode send -url "ws://localhost:$WE1/ws" -payload "$PAYLOAD_E" -recipient "$PEER_E3" -timeout 3s \
+  || fail "send phase E failed"
+
+wait "$PROBE1_PID" "$PROBE2_PID" "$PROBE3_PID"; PROBE_PID=""
+grep -qF "listen finished" "$WORK/e1_frames.jsonl" || fail "e1 probe failed: $(cat "$WORK/probe_e1.err")"
+grep -qF "listen finished" "$WORK/e3_frames.jsonl" || fail "e3 probe failed: $(cat "$WORK/probe_e3.err")"
+grep -qF "listen finished" "$WORK/e4_frames.jsonl" || fail "e4 probe failed: $(cat "$WORK/probe_e4.err")"
+
+# 1. The DM must be delivered to e3 through the same 2-hop relay as Phase B.
+grep -qF "$PAYLOAD_E" "$WORK/e3.log" || {
+  echo "--- e3 log ---"; tail -30 "$WORK/e3.log"; fail "spray DM E NOT delivered to e3"
+}
+pass "spray DM E delivered to e3 through e2 (2 hops, bounded copies)"
+
+# 2. The relay event at e3 must carry the copy count: budget L=2 → copies=2.
+MSG_E=$(grep -F "$PAYLOAD_E" "$WORK/e3_frames.jsonl" \
+  | grep -oE '"id":"[0-9a-f]+"' | head -1 | sed -E 's/.*:"//;s/"//')
+[ -n "$MSG_E" ] || fail "could not find message id for payload E in e3 frames"
+RELAY_E=$(grep -F "$MSG_E" "$WORK/e3_frames.jsonl" | grep '"type":"relay"' || true)
+echo "$RELAY_E" | grep -q '"action":"received"' || fail "e3 never reported received for $MSG_E"
+echo "$RELAY_E" | grep -q '"copies":2' || fail "relay event for $MSG_E shows copies != 2 (budget not honored on the wire)"
+pass "budget observable on the wire: relay event at e3 shows copies=2"
+
+# 3. The delivery receipt must travel back to e1 over the routed path.
+ACK_E=$(grep -F "$MSG_E" "$WORK/e1_frames.jsonl" | grep '"type":"delivery_ack"' || true)
+[ -n "$ACK_E" ] || fail "no delivery receipt for spray DM E reached e1"
+echo "$ACK_E" | grep -q '"status":"received"' || fail "delivery receipt for E is not 'received'"
+pass "delivery receipt for $MSG_E returned to e1 over the routed path"
+
+# 4. The spur node must be untouched — epidemic flooding hands a copy to
+#    every connected node (Phases A–B proved that), bounded routing must
+#    not waste its budget on a node that is not on the way to e3.
+if grep -qF "$PAYLOAD_E" "$WORK/e4.log"; then
+  fail "spur node e4 received the DM — spray wasted a copy (epidemic would)"
+fi
+if grep -qF "$PAYLOAD_E" "$WORK/e4_frames.jsonl"; then
+  fail "spur node e4's bridge saw the DM — spray wasted a copy"
+fi
+pass "spur node e4 untouched — bounded routing spent exactly L=2 copies"
 
 # ── Wrap up ───────────────────────────────────────────────────────────
 echo
