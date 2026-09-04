@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Ripple integration test — REAL end-to-end mesh delivery, no mocks.
+#
+# Topology: a linear chain node1 ↔ node2 ↔ node3 with mDNS disabled.
+# node1 and node3 are never directly connected, so the ONLY way a message
+# from node1 reaches node3 is store-and-forward relay through node2.
+#
+# What this proves:
+#   1. A broadcast from node1 arrives at node3 through node2's relay, and
+#      node2's WebSocket bridge emits factual `relay` events: received
+#      (from node1) then forwarded.
+#   2. A DM from node1 addressed to node3 (a peer it is NOT connected to)
+#      is routed through the mesh, node3 auto-acks it, and the `received`
+#      delivery receipt travels back to node1.
+#
+# Every assertion greps real process output (logs and bridge frames).
+# Exit code is non-zero if any step fails.
+set -euo pipefail
+
+# Git Bash on Windows converts /ip4/... arguments into Windows paths
+# (C:/ProgramFiles/Git/ip4/...). Disable that so multiaddrs survive
+# untouched. Harmless no-op on Linux/macOS.
+export MSYS_NO_PATHCONV=1
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GO_DIR="$ROOT/go-daemon"
+WORK="$(mktemp -d)"
+# Native tools (go, rippled) need a Windows path on Git Bash; convert it.
+# On Linux/macOS cygpath does not exist and WORK is already native.
+WORK_NATIVE="$(cygpath -w "$WORK" 2>/dev/null || echo "$WORK")"
+NODE1_PID="" NODE2_PID="" NODE3_PID="" PROBE_PID=""
+
+cleanup() {
+  [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null || true
+  [ -n "$NODE1_PID" ] && kill "$NODE1_PID" 2>/dev/null || true
+  [ -n "$NODE2_PID" ] && kill "$NODE2_PID" 2>/dev/null || true
+  [ -n "$NODE3_PID" ] && kill "$NODE3_PID" 2>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+fail() { echo "❌ $1"; exit 1; }
+pass() { echo "✅ $1"; }
+
+echo "═══ Ripple integration test — 3-node relay chain ═══"
+echo "workdir: $WORK"
+
+# ── Build ──────────────────────────────────────────────────────────────
+# Go appends .exe on Windows (Git Bash / MSYS) but not on Linux/macOS.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;;
+  *) EXE="" ;;
+esac
+(cd "$GO_DIR" && go build -o "$WORK_NATIVE/rippled$EXE" ./cmd/rippled)
+(cd "$GO_DIR" && go build -o "$WORK_NATIVE/wsprobe$EXE" ./integration/wsprobe)
+RIPPLED="$WORK_NATIVE/rippled$EXE"
+WSPROBE="$WORK_NATIVE/wsprobe$EXE"
+DATA1="$WORK_NATIVE/1"; DATA2="$WORK_NATIVE/2"; DATA3="$WORK_NATIVE/3"
+pass "built rippled + wsprobe"
+
+P1=19401; P2=19402; P3=19403
+W1=19871; W2=19872; W3=19873
+
+# ── Start node1 (no bootstrap; the chain head) ─────────────────────────
+"$RIPPLED" -port $P1 -wsport $W1 -data "$DATA1" -nick node1 -debug -nomdns \
+  >"$WORK/node1.log" 2>&1 &
+NODE1_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Mesh peer ID" "$WORK/node1.log" && break
+  [ "$i" -eq 30 ] && fail "node1 never started: $(tail -20 "$WORK/node1.log")"
+  sleep 1
+done
+PEER1=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/node1.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+[ -n "$PEER1" ] || fail "could not parse node1 peer ID"
+pass "node1 up: $PEER1"
+
+# ── Start node2, bootstrapping to node1 ────────────────────────────────
+"$RIPPLED" -port $P2 -wsport $W2 -data "$DATA2" -nick node2 -debug -nomdns \
+  -peers "/ip4/127.0.0.1/tcp/$P1/p2p/$PEER1" >"$WORK/node2.log" 2>&1 &
+NODE2_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Peer connected" "$WORK/node2.log" && break
+  [ "$i" -eq 30 ] && fail "node2 never joined: $(tail -20 "$WORK/node2.log")"
+  sleep 1
+done
+grep -q "Mesh peer ID" "$WORK/node2.log" || fail "node2 never announced identity"
+PEER2=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/node2.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+pass "node2 up: $PEER2 (dialed node1)"
+
+# ── Start node3, bootstrapping to node2 (NOT node1 — forced relay path) ─
+"$RIPPLED" -port $P3 -wsport $W3 -data "$DATA3" -nick node3 -debug -nomdns \
+  -peers "/ip4/127.0.0.1/tcp/$P2/p2p/$PEER2" >"$WORK/node3.log" 2>&1 &
+NODE3_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Peer connected" "$WORK/node3.log" && break
+  [ "$i" -eq 30 ] && fail "node3 never joined: $(tail -20 "$WORK/node3.log")"
+  sleep 1
+done
+grep -q "Mesh peer ID" "$WORK/node3.log" || fail "node3 never announced identity"
+PEER3=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/node3.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+pass "node3 up: $PEER3 (dialed node2 only — node1↔node3 are NOT connected)"
+
+# Give GossipSub time to graft the topic mesh along the chain.
+sleep 3
+
+# ── Phase A: broadcast relayed through node2 ──────────────────────────
+echo "─── Phase A: broadcast from node1 must reach node3 via node2 ───"
+PAYLOAD_A="ripple-relay-a-$(date +%s)"
+"$WSPROBE" -mode listen -url "ws://localhost:$W2/ws" -timeout 12s >"$WORK/node2_frames.jsonl" 2>"$WORK/probe2.err" &
+PROBE_PID=$!
+sleep 1  # let the probe connect and receive identity
+
+"$WSPROBE" -mode send -url "ws://localhost:$W1/ws" -payload "$PAYLOAD_A" -timeout 3s \
+  || fail "send phase A failed"
+wait "$PROBE_PID"; PROBE_PID=""
+# The listen probe exits non-zero only on a premature read error.
+grep -qF "listen finished" "$WORK/node2_frames.jsonl" || fail "node2 probe failed: $(cat "$WORK/probe2.err")"
+
+# node3's log must contain the payload (it can only have arrived via node2).
+grep -qF "$PAYLOAD_A" "$WORK/node3.log" || {
+  echo "--- node3 log ---"; tail -30 "$WORK/node3.log"; fail "payload A NOT delivered to node3"
+}
+pass "payload A delivered to node3 (through node2)"
+
+# node2's bridge must have relay frames: received then forwarded, from node1.
+# First find the message id from the chat frame that carries the payload.
+MSG_A=$(grep -F "$PAYLOAD_A" "$WORK/node2_frames.jsonl" \
+  | grep -oE '"id":"[0-9a-f]+"' | head -1 | sed -E 's/.*:"//;s/"//')
+[ -n "$MSG_A" ] || fail "could not find message id for payload A in node2 frames"
+pass "message id for payload A: $MSG_A"
+
+RELAY_A=$(grep -F "$MSG_A" "$WORK/node2_frames.jsonl" | grep '"type":"relay"' || true)
+echo "$RELAY_A" | grep -q '"action":"received"' || fail "node2 never reported received for $MSG_A"
+echo "$RELAY_A" | grep -q '"action":"forwarded"' || fail "node2 never reported forwarded for $MSG_A"
+echo "$RELAY_A" | grep -qF "\"from\":\"$PEER1\"" || fail "relay events for $MSG_A not attributed to node1"
+pass "node2 emitted received+forwarded relay events for $MSG_A (from node1)"
+
+# ── Phase B: DM to an unreachable peer + delivery receipt round-trip ──
+echo "─── Phase B: DM node1→node3 routes via node2 and comes back acked ───"
+PAYLOAD_B="ripple-dm-b-$(date +%s)"
+"$WSPROBE" -mode listen -url "ws://localhost:$W1/ws" -timeout 12s >"$WORK/node1_frames.jsonl" 2>"$WORK/probe1.err" &
+PROBE_PID=$!
+sleep 1
+
+"$WSPROBE" -mode send -url "ws://localhost:$W1/ws" -payload "$PAYLOAD_B" -recipient "$PEER3" -timeout 3s \
+  || fail "send phase B failed"
+wait "$PROBE_PID"; PROBE_PID=""
+grep -qF "listen finished" "$WORK/node1_frames.jsonl" || fail "node1 probe failed: $(cat "$WORK/probe1.err")"
+
+# node3 must have received the DM (through node2 — node1 cannot dial node3).
+grep -qF "$PAYLOAD_B" "$WORK/node3.log" || {
+  echo "--- node3 log ---"; tail -30 "$WORK/node3.log"; fail "DM B NOT delivered to node3"
+}
+pass "DM B delivered to node3 through the mesh"
+
+# The auto-ack must travel back: node1's bridge shows a delivery_ack whose
+# msg_id matches the DM. The DM's own chat frame echoes back through node2's
+# relay, so extract its id from node1's frames.
+MSG_B=$(grep -F "$PAYLOAD_B" "$WORK/node1_frames.jsonl" \
+  | grep -oE '"id":"[0-9a-f]+"' | head -1 | sed -E 's/.*:"//;s/"//')
+[ -n "$MSG_B" ] || fail "could not find message id for DM B in node1 frames"
+
+ACK_B=$(grep -F "$MSG_B" "$WORK/node1_frames.jsonl" | grep '"type":"delivery_ack"' || true)
+[ -n "$ACK_B" ] || fail "no delivery receipt for DM B reached node1"
+echo "$ACK_B" | grep -q '"status":"received"' || fail "delivery receipt for DM B is not 'received'"
+pass "delivery receipt (received) for $MSG_B travelled back to node1"
+
+# ── Wrap up ───────────────────────────────────────────────────────────
+echo
+echo "══════════════════════════════════════════════════════════════"
+echo "ALL INTEGRATION ASSERTIONS PASSED — real multi-hop mesh delivery"
+echo "══════════════════════════════════════════════════════════════"

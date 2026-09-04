@@ -73,14 +73,14 @@ jobs:
       - name: Build debug APK (verify compiles)
         run: flutter build apk --debug
 
-  # ── Integration Test: real message delivery across a 3-node mesh ──
-  # Three rippled processes run directly on the host (no Docker networking
-  # unknowns). Node 2 and node 3 explicitly bootstrap to node 1's peer ID,
-  # then a chat message is sent through node 1's WebSocket bridge. The test
-  # asserts the payload appears in the logs of BOTH other nodes — i.e. the
-  # message was really delivered through the mesh.
+  # ── Integration Test: real multi-hop delivery across a 3-node chain ──
+  # Runs scripts/integration_test.sh (single source of truth, same script
+  # runs locally via `make integration`). Topology is a linear chain
+  # node1↔node2↔node3 with mDNS disabled, so node3 can ONLY be reached
+  # through node2's store-and-forward relay. The script asserts relay
+  # events on node2's bridge and a delivery-receipt round trip to node1.
   integration-test:
-    name: Integration Test (3-node mesh delivery)
+    name: Integration Test (3-node relay chain)
     needs: [go-daemon, flutter-app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -94,85 +94,8 @@ jobs:
           cache: true
           cache-dependency-path: go-daemon/go.sum
 
-      - name: Build rippled
-        working-directory: ./go-daemon
-        run: go build -o rippled ./cmd/rippled
-
-      - name: Start 3-node mesh
-        run: |
-          set -euo pipefail
-          WORK=$(mktemp -d)
-          echo "WORK=$WORK" >> "$GITHUB_ENV"
-          mkdir -p "$WORK/1" "$WORK/2" "$WORK/3"
-
-          ./go-daemon/rippled -port 19401 -wsport 19871 -data "$WORK/1" -nick node1 -debug \
-            > "$WORK/node1.log" 2>&1 &
-          echo "NODE1_PID=$!" >> "$GITHUB_ENV"
-
-          # Wait for node1 to announce its peer ID, then extract it from the
-          # /p2p/ suffix of its announced multiaddresses.
-          for i in $(seq 1 30); do
-            grep -q "Mesh peer ID" "$WORK/node1.log" && break
-            [ "$i" -eq 30 ] && { echo "❌ node1 never started"; tail -30 "$WORK/node1.log"; exit 1; }
-            sleep 1
-          done
-          PEER1=$(grep -oE 'p2p/[0-9A-Za-z]+' "$WORK/node1.log" | head -1 | cut -d/ -f2)
-          echo "node1 peer ID: $PEER1"
-
-          # Nodes 2 and 3 dial node1 explicitly (mDNS alone is unreliable
-          # in CI-like networks, so bootstrapping must be deterministic).
-          ./go-daemon/rippled -port 19402 -wsport 19872 -data "$WORK/2" -nick node2 -debug \
-            -peers "/ip4/127.0.0.1/tcp/19401/p2p/$PEER1" > "$WORK/node2.log" 2>&1 &
-          echo "NODE2_PID=$!" >> "$GITHUB_ENV"
-          ./go-daemon/rippled -port 19403 -wsport 19873 -data "$WORK/3" -nick node3 -debug \
-            -peers "/ip4/127.0.0.1/tcp/19401/p2p/$PEER1" > "$WORK/node3.log" 2>&1 &
-          echo "NODE3_PID=$!" >> "$GITHUB_ENV"
-
-          # Wait until both nodes report the mesh connection.
-          for i in $(seq 1 30); do
-            if grep -q "Peer connected" "$WORK/node2.log" && grep -q "Peer connected" "$WORK/node3.log"; then
-              echo "✅ mesh formed after ${i}s"
-              break
-            fi
-            [ "$i" -eq 30 ] && {
-              echo "❌ mesh did not form"
-              echo "--- node1 log ---"; tail -20 "$WORK/node1.log"
-              echo "--- node2 log ---"; tail -20 "$WORK/node2.log"
-              echo "--- node3 log ---"; tail -20 "$WORK/node3.log"
-              exit 1
-            }
-            sleep 1
-          done
-          # Give GossipSub a moment to graft the topic mesh before sending.
-          sleep 3
-
-      - name: Send message via node 1 and assert delivery to nodes 2 and 3
-        run: |
-          set -euo pipefail
-          WORK="$WORK"
-          PAYLOAD="ripple-ci-$(date +%s)"
-          echo "Sending payload: $PAYLOAD"
-
-          cd go-daemon
-          go run ./integration/wsprobe -url ws://localhost:19871/ws -payload "$PAYLOAD" -timeout 5s
-          cd ..
-
-          sleep 3
-          for node in node2 node3; do
-            if grep -q "$PAYLOAD" "$WORK/$node.log"; then
-              echo "✅ message delivered to $node"
-            else
-              echo "❌ message NOT delivered to $node"
-              tail -40 "$WORK/$node.log"
-              exit 1
-            fi
-          done
-          echo "✅ real mesh delivery verified (broadcast from node1 reached node2 and node3)"
-
-      - name: Cleanup
-        if: always()
-        run: |
-          kill ${NODE1_PID:-} ${NODE2_PID:-} ${NODE3_PID:-} 2>/dev/null || true
+      - name: Run integration test
+        run: bash scripts/integration_test.sh
 
   # ── Docker Image Build ──
   docker-build:
