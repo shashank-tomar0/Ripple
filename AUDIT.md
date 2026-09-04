@@ -88,6 +88,38 @@ chunks. Not claimed as working until it is.
 Broadcast SOS with urgency, location, expiry; manager + bridge + app banner
 exist. **Proof gap:** no end-to-end SOS delivery test.
 
+### 1.11 Routing research (decision layer) — 🟢 as research, 🟡 not yet live
+Destination-aware store-and-forward (`pkg/routing`), the DLF-standard DTN
+family, replacing epidemic-only flooding:
+
+- **PROPHET predictability** — per-peer delivery predictability P in [0,1];
+  rises on encounter (`P += (1-P)·P_init`), decays by `Gamma^units` when
+  apart, and *transits* through mutual acquaintances with the
+  `(1-P_ac)·P_ab·P_bc·Beta` dampener (without it the recurrence overshoots
+  — caught and pinned by tests).
+- **Spray-and-wait** — per-message copy budget L: spray up to L copies,
+  then wait, handing a copy on only to peers with strictly higher
+  predictability (the PROPHET hybrid). Walk-forward decisions are pure
+  functions of observable state.
+- **Deterministic simulator** (`pkg/routing/sim`) — random-waypoint
+  mobility, radio-range contacts, injected flows; runs the SAME decision
+  code as the live mesh; identical seed ⇒ identical outcome (asserted).
+  No package-level mutable state; map iterations that feed decisions are
+  sorted. Contact exchange is once-per-pair so copies cannot ping-pong
+  within a tick.
+- **Benchmark CLI** (`cmd/routingbench`) — sparse/medium/dense scenarios,
+  pinned seeds, epidemic vs spray-and-wait table, and an exit-code gate:
+  spray must save copies in every scenario without collapsing delivery.
+
+**Proof:** `routing_test.go` pins the PROPHET recurrences and the full
+spray decision matrix; `sim/sim_test.go` asserts determinism (same seed,
+same byte-for-byte outcome), sanity bounds, the multi-seed
+"spray delivers ≥60% of epidemic with ≤60% of its copies" invariant, and
+the L=5 budget cap; the bench's gate runs in CI.
+**Proof gap (honest):** this decides *in simulation* — the live mesh still
+floods. Wiring the forwarder into the mesh's forwarding path is the next
+milestone, tracked below.
+
 ## 2. Flutter app (`flutter-app`)
 
 ### 2.1 Daemon transport — 🟢
@@ -135,6 +167,7 @@ Single wire convention: Unix **nanoseconds** everywhere, via
 | Go build + vet + race tests | `make go-check` | local + CI |
 | Flutter analyze + tests + APK | CI job `flutter-app` | CI |
 | 3-node mesh delivery (multi-hop through a middle node) | `make integration` | local + CI |
+| Routing benchmark (claims gate) | `make bench` | local + CI |
 | Docker image boots cleanly | CI job `docker-build` | CI |
 
 Every check must pass on `main`. There are no `|| true` escapes anywhere.
@@ -146,7 +179,7 @@ Every check must pass on `main`. There are no `|| true` escapes anywhere.
 | App ↔ daemon on real hardware | ⚫ | Device/emulator smoke test (first milestone) |
 | SQLite/durable store | ⚫ | Phase 5, after routing |
 | BLE / Wi-Fi Aware / LoRa transports | ⚫ | Deferred; LAN first |
-| Smart routing (spray-and-wait, PROPHET) | ⚫ | Phase 3, with benchmark harness |
+| Smart routing (spray-and-wait, PROPHET) | 🟡 | Decision layer + simulator + benchmark proven; **not yet wired into the live mesh** — wire the forwarder into `mesh.go`'s forwarding path with a per-message budget |
 | ~~Identity seed-phrase backup~~ | 🟢 done | CLI + bridge + app dialog; phases C & D assert it end-to-end |
 | Automatic re-send on delivery failure | ⚫ | Phase 3 store-and-forward, with benchmark |
 | End-to-end file transfer test | ⚫ | Requires devices |
