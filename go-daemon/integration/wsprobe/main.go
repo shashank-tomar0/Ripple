@@ -16,11 +16,21 @@
 //	         arrives. Used to prove the app-facing backup path serves the
 //	         real identity key.
 //
+//	sos-send — broadcast a real SOS frame over the bridge, then wait for
+//	         the delivery receipt to round-trip: the bridge echoes our own
+//	         SOS (id extractable), and the mesh's ack arrives as a
+//	         delivery_ack for that id. Exits non-zero if no ack arrives.
+//
+//	sos-listen — wait for an `sos` frame from the mesh (someone else's
+//	         alert), assert its urgency/message, print it, exit 0.
+//
 // Usage:
 //
 //	go run ./integration/wsprobe -mode send -url ws://localhost:9876/ws -payload "hello"
 //	go run ./integration/wsprobe -mode listen -url ws://localhost:9876/ws -timeout 8s > frames.jsonl
 //	go run ./integration/wsprobe -mode seed -url ws://localhost:9876/ws
+//	go run ./integration/wsprobe -mode sos-send -url ws://localhost:9876/ws -payload "help" -timeout 10s
+//	go run ./integration/wsprobe -mode sos-listen -url ws://localhost:9876/ws -payload "help" -timeout 10s
 package main
 
 import (
@@ -35,10 +45,11 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "send", "probe mode: send | listen")
+	mode := flag.String("mode", "send", "probe mode: send | listen | seed | sos-send | sos-listen")
 	url := flag.String("url", "ws://localhost:9876/ws", "daemon WebSocket bridge URL")
 	payload := flag.String("payload", "hello ripple mesh", "chat payload to send")
 	recipient := flag.String("recipient", "", "peer ID to address the message to (empty = broadcast)")
+	urgency := flag.String("urgency", "high", "SOS urgency for sos-send")
 	timeout := flag.Duration("timeout", 5*time.Second, "how long to watch/listen")
 	flag.Parse()
 
@@ -56,8 +67,12 @@ func main() {
 		listenMode(conn, *timeout)
 	case "seed":
 		seedMode(conn, *timeout)
+	case "sos-send":
+		sosSendMode(conn, *payload, *urgency, *timeout)
+	case "sos-listen":
+		sosListenMode(conn, *payload, *timeout)
 	default:
-		fmt.Fprintf(os.Stderr, "❌ unknown mode %q (want send|listen|seed)\n", *mode)
+		fmt.Fprintf(os.Stderr, "❌ unknown mode %q (want send|listen|seed|sos-send|sos-listen)\n", *mode)
 		os.Exit(1)
 	}
 }
@@ -138,6 +153,104 @@ func seedMode(conn *websocket.Conn, timeout time.Duration) {
 			fmt.Fprintf(os.Stderr, "❌ bridge error: %v\n", frame["payload"])
 			os.Exit(1)
 		}
+	}
+}
+
+// sosSendMode broadcasts a real SOS and waits for the delivery receipt to
+// round-trip: the bridge echoes our own alert (giving us the message ID),
+// and the mesh ack arrives as a delivery_ack addressed to that ID.
+func sosSendMode(conn *websocket.Conn, msg, urgency string, timeout time.Duration) {
+	payload, err := json.Marshal(map[string]interface{}{
+		"urgency":        urgency,
+		"message":        msg,
+		"expire_minutes": 60,
+		"ack_required":   true,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ marshal sos payload: %v\n", err)
+		os.Exit(1)
+	}
+	body, err := json.Marshal(map[string]string{
+		"type":    "sos",
+		"payload": string(payload),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ marshal sos frame: %v\n", err)
+		os.Exit(1)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, body); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ write sos frame: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🚨 SOS sent: %s (urgency=%s)\n", msg, urgency)
+
+	// Wait for our own echo (to learn the daemon-generated ID), then for
+	// the delivery_ack carrying that ID.
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	var sosID string
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ no delivery receipt for SOS before deadline: %v\n", err)
+			os.Exit(1)
+		}
+		var frame map[string]interface{}
+		if json.Unmarshal(data, &frame) != nil {
+			continue
+		}
+		switch frame["type"] {
+		case "sos":
+			if id, ok := frame["id"].(string); ok && id != "" {
+				sosID = id
+			}
+		case "delivery_ack":
+			if sosID == "" {
+				continue // ack for something else; we need our echo first
+			}
+			if frame["msg_id"] == sosID && frame["status"] == "received" {
+				fmt.Printf("✅ SOS delivery receipt received for %s\n", sosID)
+				return
+			}
+		case "error":
+			fmt.Fprintf(os.Stderr, "❌ bridge error: %v\n", frame["payload"])
+			os.Exit(1)
+		}
+	}
+}
+
+// sosListenMode waits for an SOS alert broadcast from the mesh, asserts it
+// carries the expected message, prints it, and exits 0.
+func sosListenMode(conn *websocket.Conn, wantMsg string, timeout time.Duration) {
+	hello, _ := json.Marshal(map[string]string{"type": "ping"})
+	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ write ping: %v\n", err)
+		os.Exit(1)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ no SOS frame before deadline: %v\n", err)
+			os.Exit(1)
+		}
+		var frame map[string]interface{}
+		if json.Unmarshal(data, &frame) != nil {
+			continue
+		}
+		if frame["type"] != "sos" {
+			continue
+		}
+		if got, _ := frame["message"].(string); got != wantMsg {
+			fmt.Fprintf(os.Stderr, "❌ SOS message %q != expected %q\n", got, wantMsg)
+			os.Exit(1)
+		}
+		if _, ok := frame["urgency"].(string); !ok || frame["urgency"] == "" {
+			fmt.Fprintf(os.Stderr, "❌ SOS frame missing urgency\n")
+			os.Exit(1)
+		}
+		fmt.Printf("✅ SOS received: %s\n", string(data))
+		return
 	}
 }
 

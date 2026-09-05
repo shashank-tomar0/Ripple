@@ -337,6 +337,68 @@ if grep -qF "$PAYLOAD_E" "$WORK/e4_frames.jsonl"; then
 fi
 pass "spur node e4 untouched — bounded routing spent exactly L=2 copies"
 
+# ── Phase F: SOS emergency broadcast round-trip ────────────────────
+# Two fresh nodes: f1 broadcasts a real SOS over its bridge; f2 receives
+# the alert over the mesh and its SOS manager auto-acks; the receipt
+# travels back to f1's bridge. Also asserts the receiver-side bridge
+# emits the structured `sos` frame the app banner renders.
+echo "─── Phase F: SOS broadcast — deliver, auto-ack, receipt round-trip ───"
+for p in "$NODE1_PID" "$NODE2_PID" "$NODE3_PID" "$NODE4_PID"; do
+  [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  [ -n "$p" ] && wait "$p" 2>/dev/null || true
+  [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
+done
+NODE1_PID=""; NODE2_PID=""; NODE3_PID=""; NODE4_PID=""
+sleep 1
+
+PF1=19421; PF2=19422
+WF1=19891; WF2=19892
+
+"$RIPPLED" -port $PF1 -wsport $WF1 -data "$WORK_NATIVE/F1" -nick f1 -debug -nomdns \
+  >"$WORK/f1.log" 2>&1 &
+NODE1_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Mesh peer ID" "$WORK/f1.log" && break
+  [ "$i" -eq 30 ] && fail "f1 never started: $(tail -20 "$WORK/f1.log")"
+  sleep 1
+done
+PEER_F1=$(grep -oE 'Mesh peer ID:[[:space:]]+[0-9A-Za-z]+' "$WORK/f1.log" | head -1 | sed -E 's/.*:[[:space:]]+//')
+[ -n "$PEER_F1" ] || fail "could not parse f1 peer ID"
+pass "f1 up: $PEER_F1"
+
+"$RIPPLED" -port $PF2 -wsport $WF2 -data "$WORK_NATIVE/F2" -nick f2 -debug -nomdns \
+  -peers "/ip4/127.0.0.1/tcp/$PF1/p2p/$PEER_F1" >"$WORK/f2.log" 2>&1 &
+NODE2_PID=$!
+for i in $(seq 1 30); do
+  grep -q "Peer connected" "$WORK/f2.log" && break
+  [ "$i" -eq 30 ] && fail "f2 never joined: $(tail -20 "$WORK/f2.log")"
+  sleep 1
+done
+pass "f2 up (dialed f1)"
+
+# Give GossipSub time to graft the topic mesh.
+sleep 3
+
+SOS_MSG="ripple-sos-f-$(date +%s) I need help"
+# Receiver-side probe: must see the structured sos frame on f2's bridge.
+"$WSPROBE" -mode sos-listen -url "ws://localhost:$WF2/ws" -payload "$SOS_MSG" -timeout 12s \
+  >"$WORK/f2_sos.jsonl" 2>"$WORK/probe_f2sos.err" &
+PROBE_PID=$!
+sleep 2  # let the receiver probe connect and graft settle
+
+# Sender-side probe: broadcasts the SOS, then waits for the delivery
+# receipt to travel back. Exits non-zero if no ack arrives.
+"$WSPROBE" -mode sos-send -url "ws://localhost:$WF1/ws" -payload "$SOS_MSG" -timeout 12s \
+  || fail "sos-send failed: $(cat "$WORK/probe_f1sos.err" 2>/dev/null)"
+pass "SOS broadcast from f1 auto-acked: delivery receipt round-tripped to f1's bridge"
+
+wait "$PROBE_PID"; PROBE_PID=""
+grep -q "✅ SOS received" "$WORK/f2_sos.jsonl" || {
+  echo "--- f2 sos probe err ---"; cat "$WORK/probe_f2sos.err"
+  fail "f2's bridge never emitted the sos frame"
+}
+pass "f2's bridge emitted the structured sos frame (banner data is real)"
+
 # ── Wrap up ───────────────────────────────────────────────────────────
 echo
 echo "══════════════════════════════════════════════════════════════"
