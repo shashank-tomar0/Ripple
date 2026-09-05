@@ -28,7 +28,7 @@ func TestRoundtripDeliveryAck(t *testing.T) {
 }
 
 func TestRoundtripFileMetadata(t *testing.T) {
-	original := message.NewFileMetadata("peer1", "Alice", "peer2", "photo.jpg", "image/jpeg", 2048576, 32)
+	original := message.NewFileMetadata("peer1", "Alice", "peer2", "file-123", "photo.jpg", "image/jpeg", 2048576, 32)
 	testRoundtrip(t, original)
 }
 

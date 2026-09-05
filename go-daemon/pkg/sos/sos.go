@@ -4,6 +4,7 @@ package sos
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 const (
 	MaxTTL            = 64               // SOS messages travel up to 64 hops
 	ReBroadcastEvery  = 30 * time.Second // Re-broadcast every 30s while active
-	ActiveDuration    = 10 * time.Minute // SOS stays active for 10 minutes
+	ActiveDuration    = 60 * time.Minute // SOS stays active for 60 minutes (matches AutoExpire on the wire)
 )
 
 // ActiveAlert tracks an ongoing SOS alert.
@@ -87,10 +88,18 @@ func (m *Manager) SendAlert(sender, senderNick, text string,
 
 	msg := message.NewSOS(sender, senderNick, text, urgency, lat, lon, accuracy)
 
+	// The payload is parsed from the message itself — the single source of
+	// truth (message.NewSOS), so the tracked alert can never drift from
+	// what went on the wire.
+	payload, err := message.ParseSOSPayload(msg)
+	if err != nil {
+		return "", fmt.Errorf("parse own SOS payload: %w", err)
+	}
+
 	// Track locally as active alert
 	alert := &ActiveAlert{
 		Message:    msg,
-		Payload:    &message.SOSPayload{Urgency: urgency, Message: text, Latitude: lat, Longitude: lon, Accuracy: accuracy, Timestamp: time.Now().UnixMilli(), AutoExpire: 60, AckRequired: true},
+		Payload:    payload,
 		StartedAt:  time.Now(),
 		ExpiresAt:  time.Now().Add(ActiveDuration),
 		ReceivedAt: time.Now(),

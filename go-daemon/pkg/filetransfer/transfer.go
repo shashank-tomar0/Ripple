@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -139,13 +140,15 @@ func (m *Manager) Start(ctx context.Context) {
 // SendFile initiates sending a file to a peer.
 // It sends the metadata notification to the bridge first, then chunks the file
 // and sends each chunk over a direct libp2p stream in a background goroutine.
-func (m *Manager) SendFile(filePath, recipient, senderNick string) (*Transfer, error) {
-	// Open the file
+// A non-empty fileID is used as the canonical transfer ID (the app's message
+// ID, so notifications correlate with the chat row); empty generates one.
+func (m *Manager) SendFile(filePath, recipient, senderNick, fileID string) (*Transfer, error) {
+	// Open the file. Ownership passes to sendFileStream (which closes it)
+	// — closing here would race the background goroutine reading it.
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
 	}
-	defer file.Close()
 
 	// Stat the file
 	fi, err := file.Stat()
@@ -153,8 +156,10 @@ func (m *Manager) SendFile(filePath, recipient, senderNick string) (*Transfer, e
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 
-	// Generate unique file ID
-	fileID := newFileID()
+	// Canonical transfer ID: caller-supplied (app message ID) or fresh.
+	if fileID == "" {
+		fileID = newFileID()
+	}
 
 	// Calculate chunk count
 	fileSize := fi.Size()
@@ -190,10 +195,12 @@ func (m *Manager) SendFile(filePath, recipient, senderNick string) (*Transfer, e
 	m.transfers[fileID] = transfer
 	m.mu.Unlock()
 
-	// Notify via callback to bridge -> Flutter
+	// Notify via callback to bridge -> Flutter. The notification carries the
+	// transfer's fileID (== the app's message ID), so the app can merge the
+	// started/progress/complete frames into the chat row it already shows.
 	if m.OnFileNotification != nil {
 		m.OnFileNotification(message.NewFileMetadata(
-			meta.Sender, meta.SenderNick, recipient,
+			meta.Sender, meta.SenderNick, recipient, meta.FileID,
 			meta.Name, meta.MimeType, fileSize, chunkCount,
 		))
 	}
@@ -348,6 +355,14 @@ func (m *Manager) handleStream(s network.Stream) {
 		return // Not for us
 	}
 
+	// The filename comes from a remote peer — never trust it in a path.
+	// Reject anything containing a path separator (which would let a peer
+	// write outside the incoming directory), dot-dot, or an empty name.
+	if meta.Name == "" || meta.Name == "." || meta.Name == ".." ||
+		strings.ContainsAny(meta.Name, `\/`) {
+		return // not for us: untrusted filename
+	}
+
 	// Create transfer tracking object
 	outputPath := filepath.Join(m.incomingDir, meta.FileID+"_"+meta.Name)
 	transfer := &Transfer{
@@ -364,10 +379,11 @@ func (m *Manager) handleStream(s network.Stream) {
 	m.transfers[meta.FileID] = transfer
 	m.mu.Unlock()
 
-	// Notify about incoming transfer metadata
+	// Notify about incoming transfer metadata — same canonical fileID as the
+	// sender's, so the receiving app correlates every frame with one entry.
 	if m.OnFileNotification != nil {
 		m.OnFileNotification(message.NewFileMetadata(
-			meta.Sender, meta.SenderNick, localPID,
+			meta.Sender, meta.SenderNick, localPID, meta.FileID,
 			meta.Name, meta.MimeType, meta.Size, meta.ChunkCount,
 		))
 	}
@@ -389,6 +405,16 @@ func (m *Manager) handleStream(s network.Stream) {
 		}
 
 		chunk := chunkPacket.Chunk
+
+		// Reject out-of-range or self-inconsistent chunks from the wire.
+		if chunk.ChunkIdx < 0 || chunk.ChunkIdx >= meta.ChunkCount {
+			m.failTransfer(transfer, fmt.Errorf("chunk %d out of range (count %d)", chunk.ChunkIdx, meta.ChunkCount))
+			return
+		}
+		if chunk.Size != len(chunk.Data) {
+			m.failTransfer(transfer, fmt.Errorf("chunk %d size mismatch: declared %d, actual %d", chunk.ChunkIdx, chunk.Size, len(chunk.Data)))
+			return
+		}
 
 		transfer.mu.Lock()
 		transfer.Chunks[chunk.ChunkIdx] = chunk

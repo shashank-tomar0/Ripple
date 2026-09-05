@@ -18,9 +18,11 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/crypto"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/filetransfer"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/identity"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/message"
 	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/mesh"
+	"github.com/shashank-tomar0/Ripple/go-daemon/pkg/sos"
 )
 
 const (
@@ -53,12 +55,14 @@ var upgrader = websocket.Upgrader{
 // Bridge provides a WebSocket server that bridges the Ripple mesh network
 // to connected Flutter app clients.
 type Bridge struct {
-	node       *mesh.Node
-	peerID     string
-	nickname   string
-	addr       string
-	e2eManager *crypto.Manager
-	identity   *identity.Identity
+	node        *mesh.Node
+	peerID      string
+	nickname    string
+	addr        string
+	e2eManager  *crypto.Manager
+	identity    *identity.Identity
+	sosManager  *sos.Manager
+	fileManager *filetransfer.Manager
 
 	clients     map[*Client]bool
 	clientsMu   sync.RWMutex
@@ -70,6 +74,18 @@ type Bridge struct {
 	log     *log.Logger
 	started bool
 	closeCh chan struct{}
+}
+
+// SetSOSManager wires the bridge to the node's SOS emergency manager so
+// that inbound `sos` frames from clients can broadcast real alerts.
+func (b *Bridge) SetSOSManager(m *sos.Manager) {
+	b.sosManager = m
+}
+
+// SetFileManager wires the bridge to the node's file transfer manager so
+// that inbound `file` frames from clients can send real files.
+func (b *Bridge) SetFileManager(m *filetransfer.Manager) {
+	b.fileManager = m
 }
 
 // Client represents a single connected WebSocket client.
@@ -275,11 +291,17 @@ func (b *Bridge) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // sendIdentity sends the identity message to a single client.
 func (b *Bridge) sendIdentity(client *Client) {
+	// The E2E manager is optional (main.go falls back to unencrypted if it
+	// fails to initialize) — the public key field must tolerate its absence.
+	pubKey := ""
+	if b.e2eManager != nil {
+		pubKey = b.e2eManager.MyPublicKeyHex()
+	}
 	msg := identityMessage{
 		Type:       "identity",
 		PeerID:     b.peerID,
 		Nickname:   b.nickname,
-		PublicKey:  b.e2eManager.MyPublicKeyHex(),
+		PublicKey:  pubKey,
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -338,14 +360,24 @@ func (b *Bridge) handleMeshMessage(msg *message.Message) {
 		return
 	}
 
-	// SOS-type messages get special handling with extra fields
+	// SOS-type messages: feed the SOS manager FIRST (dedup, expiry, ack
+	// tracking) and then get special handling with extra fields.
 	if msg.Type == message.TypeSOS {
+		if b.sosManager != nil {
+			if err := b.sosManager.HandleIncomingSOS(msg); err != nil {
+				b.log.Printf("⚠️  SOS handling failed: %v", err)
+			}
+		}
 		b.BroadcastSOS(msg)
 		return
 	}
 
-	// Delivery acknowledgment messages - forward to Flutter
+	// Delivery acknowledgment messages - forward to Flutter, and let the SOS
+	// manager count acks for its active alerts.
 	if msg.Type == message.TypeDeliveryAck {
+		if b.sosManager != nil {
+			b.sosManager.HandleDeliveryAck(msg)
+		}
 		b.BroadcastDeliveryReceipt(msg)
 		return
 	}
@@ -745,6 +777,10 @@ func (c *Client) handleIncoming(data []byte) {
 		c.handleIncomingChat(incoming)
 	case "key_exchange":
 		c.handleIncomingKeyExchange(incoming)
+	case "sos":
+		c.handleIncomingSOS(incoming)
+	case "file":
+		c.handleIncomingFile(incoming)
 	case "seed_export":
 		c.handleSeedExport()
 	case "ping":
@@ -787,6 +823,93 @@ func (c *Client) handleIncomingKeyExchange(incoming wsIncoming) {
 		short = short[:12]
 	}
 	c.bridge.log.Printf("🔑 key exchange sent to %s…", short)
+}
+
+// handleIncomingSOS broadcasts a real emergency alert through the mesh.
+// The payload is the structured SOSPayload JSON; the sender is forced to
+// the local node's identity server-side (clients cannot spoof it). The
+// alert is tracked by the SOS manager, which re-broadcasts it while active
+// and counts delivery acks.
+func (c *Client) handleIncomingSOS(incoming wsIncoming) {
+	if c.bridge.sosManager == nil {
+		c.bridge.log.Printf("SOS requested but no SOS manager configured")
+		c.sendError("SOS not available on this node")
+		return
+	}
+
+	var payload message.SOSPayload
+	if err := json.Unmarshal([]byte(incoming.Payload), &payload); err != nil {
+		c.bridge.log.Printf("invalid SOS payload: %v", err)
+		c.sendError("invalid SOS payload")
+		return
+	}
+	if payload.Message == "" {
+		c.sendError("SOS requires a message")
+		return
+	}
+	if payload.Urgency == "" {
+		payload.Urgency = message.SOSUrgencyHigh
+	}
+
+	alertID, err := c.bridge.sosManager.SendAlert(
+		c.bridge.peerID,
+		c.bridge.nickname,
+		payload.Message,
+		payload.Urgency,
+		payload.Latitude,
+		payload.Longitude,
+		payload.Accuracy,
+	)
+	if err != nil {
+		c.bridge.log.Printf("send SOS error: %v", err)
+		c.sendError(fmt.Sprintf("send failed: %v", err))
+		return
+	}
+	c.bridge.log.Printf("🚨 SOS broadcast sent: %s", alertID[:8])
+}
+
+// handleIncomingFile initiates a real file transfer. The payload carries
+// the file metadata plus the absolute path of the file on THIS host (the
+// daemon and the app run on the same device, so the daemon can read it).
+// The sender is forced server-side; the recipient is taken from the frame.
+func (c *Client) handleIncomingFile(incoming wsIncoming) {
+	if c.bridge.fileManager == nil {
+		c.bridge.log.Printf("file transfer requested but no manager configured")
+		c.sendError("file transfer not available on this node")
+		return
+	}
+	if incoming.Recipient == "" {
+		c.sendError("file transfer requires a recipient")
+		return
+	}
+
+	var meta struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal([]byte(incoming.Payload), &meta); err != nil {
+		c.bridge.log.Printf("invalid file payload: %v", err)
+		c.sendError("invalid file payload")
+		return
+	}
+	if meta.FilePath == "" {
+		c.sendError("file transfer requires file_path")
+		return
+	}
+	if incoming.ID == "" {
+		c.sendError("file transfer requires an id")
+		return
+	}
+
+	// The client's message ID becomes the canonical transfer ID, so every
+	// started/progress/complete frame correlates with the app's chat row.
+	transfer, err := c.bridge.fileManager.SendFile(meta.FilePath, incoming.Recipient, c.bridge.nickname, incoming.ID)
+	if err != nil {
+		c.bridge.log.Printf("file transfer start error: %v", err)
+		c.sendError(fmt.Sprintf("file transfer failed: %v", err))
+		return
+	}
+	c.bridge.log.Printf("📁 file transfer started: %s (%d chunks)",
+		transfer.Metadata.Name, transfer.Metadata.ChunkCount)
 }
 
 // handleIncomingChat processes a chat message from a WebSocket client and

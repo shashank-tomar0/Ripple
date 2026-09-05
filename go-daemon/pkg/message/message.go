@@ -203,10 +203,14 @@ type FileMessagePayload struct {
 	OutputPath string  `json:"output_path,omitempty"`
 }
 
-// NewFileMetadata creates a file transfer metadata message.
-func NewFileMetadata(sender, senderNick, recipient, fileName, mimeType string, fileSize int64, chunkCount int) *Message {
+// NewFileMetadata creates a file transfer metadata message. The fileID is
+// the canonical transfer identifier — it must be the SAME value everywhere
+// (the sender's message ID), or progress/complete notifications can never
+// be correlated with the transfer they describe. The message's own ID is
+// set to the fileID too, so the app can look up a transfer by message ID.
+func NewFileMetadata(sender, senderNick, recipient, fileID, fileName, mimeType string, fileSize int64, chunkCount int) *Message {
 	payload := FileMessagePayload{
-		FileID:     newID(),
+		FileID:     fileID,
 		FileName:   fileName,
 		FileSize:   fileSize,
 		MimeType:   mimeType,
@@ -215,7 +219,7 @@ func NewFileMetadata(sender, senderNick, recipient, fileName, mimeType string, f
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	return &Message{
-		ID:         newID(),
+		ID:         fileID,
 		Type:       TypeFile,
 		Sender:     sender,
 		SenderNick: senderNick,

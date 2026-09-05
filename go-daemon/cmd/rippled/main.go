@@ -219,6 +219,7 @@ func main() {
 		bridge.BroadcastFileNotification(msg)
 	}
 	ftManager.Start(ctx)
+	bridge.SetFileManager(ftManager)
 	fmt.Printf("📁 File transfer manager ready (chunk size: %dKB)\n", filetransfer.DefaultChunkSize/1024)
 	fmt.Println()
 
@@ -233,8 +234,27 @@ func main() {
 		}
 	}
 	sosManager.Start(ctx)
+	bridge.SetSOSManager(sosManager)
 	fmt.Printf("🚨 SOS emergency broadcast manager ready (TTL=%d, active=%v)\n", sos.MaxTTL, sos.ActiveDuration)
 	fmt.Println()
+
+	// Periodic store backup: the JSON backup is written on clean shutdown,
+	// but a crash (kill -9, power loss) would otherwise lose every message
+	// since startup. Autosave every 30s while running.
+	if cfg.DBPath != "" {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					msgStore.Autosave()
+				}
+			}
+		}()
+	}
 
 	fmt.Printf("✅ Ripple is running! Type /help for commands.\n\n")
 

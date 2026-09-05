@@ -54,15 +54,26 @@ func NewWithDB(path string) (*Store, error) {
 
 // Close saves data to the JSON backup file if persistence is enabled.
 func (s *Store) Close() error {
-	if s.dbPath != "" {
-		if err := s.SaveToJSON(s.dbPath + ".json"); err != nil {
-			fmt.Fprintf(os.Stderr, "store: backup error: %v\n", err)
-		}
+	return s.Autosave()
+}
+
+// Autosave persists the store to the configured backup path if persistence
+// is enabled. Safe to call repeatedly (e.g. on a timer).
+func (s *Store) Autosave() error {
+	if s.dbPath == "" {
+		return nil
+	}
+	if err := s.SaveToJSON(s.dbPath + ".json"); err != nil {
+		fmt.Fprintf(os.Stderr, "store: backup error: %v\n", err)
+		return err
 	}
 	return nil
 }
 
-// SaveToJSON persists messages and peers to a JSON file.
+// SaveToJSON persists messages and peers to a JSON file. The write is
+// atomic: data goes to a temp file in the same directory, is fsynced, and
+// then renamed over the target, so a crash mid-write can never corrupt the
+// last good backup.
 func (s *Store) SaveToJSON(path string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -80,7 +91,30 @@ func (s *Store) SaveToJSON(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, jsonData, 0644)
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(jsonData); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // LoadFromJSON restores messages and peers from a JSON backup file.
