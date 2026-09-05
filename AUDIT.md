@@ -44,8 +44,11 @@ TTL, hop count, nonce, key id) plus a binary codec (`codec/codec.go`).
 **Proof:** `message_test.go`, `codec_test.go`; nanos timestamps are asserted
 in Flutter unit tests too.
 
-### 1.4 Store — 🟡
-In-memory message store with optional JSON backup persistence.
+### 1.4 Store — 🟡 (hardened)
+In-memory message store with optional JSON backup persistence. Backups are
+now **atomic** (temp file + fsync + rename — a crash mid-write can no
+longer corrupt the last good backup) and **periodic** (the daemon autosaves
+every 30s while running, not just on clean shutdown).
 **Honest status:** this is NOT a database. No SQLite (README no longer claims
 it). **Proof:** `store_test.go` (in-memory + JSON round-trip).
 **Gap:** crash-durable, queryable storage is a product milestone (Phase 5).
@@ -79,14 +82,31 @@ back at node1's bridge. **Note:** an old `delivery` package claiming retry
 logic was dead code (never wired in) — deleted. Automatic re-send on
 failure is Phase 3 store-and-forward work, tracked below.
 
-### 1.9 File transfer — 🟡
-Metadata/progress/complete messages exist in both halves; `filetransfer`
-manager exists. **Proof gap:** no end-to-end file transfer test with real
-chunks. Not claimed as working until it is.
+### 1.9 File transfer — 🟢 (daemon side), 🟡 (app on device)
+Chunked transfer over direct libp2p streams with a single canonical
+file ID threaded through the whole chain (the app's message ID — the old
+code generated a fresh random ID in every notification, so progress could
+never correlate; fixed). **Proof:** `transfer_test.go` runs two REAL nodes
+and asserts a 150KB file (3 chunks) reassembles byte-identically with
+complete status at progress 1.0 on both sides, and that a crafted
+filename (`../../evil.txt`) cannot escape the incoming directory (path-
+traversal fix). The bridge now accepts inbound `file` frames and drives
+`SendFile` (previously rejected as "unknown message type"). **Proof gap:**
+app ↔ daemon file send on a device (needs the smoke test).
 
-### 1.10 SOS — 🟡
-Broadcast SOS with urgency, location, expiry; manager + bridge + app banner
-exist. **Proof gap:** no end-to-end SOS delivery test.
+### 1.10 SOS — 🟢 (daemon side), 🟡 (app on device)
+The SOS manager was dead code (nothing called `SendAlert`/
+`HandleIncomingSOS`/`HandleDeliveryAck`); the app's "SOS" button sent a
+plain chat message claiming it was a broadcast, and the bridge rejected
+`sos` frames. All wired now: the bridge accepts `sos` frames →
+`SendAlert` (payload parsed from the message itself — single source of
+truth), incoming SOS feeds the manager, delivery acks increment the alert's
+ack count, and the expiry/re-broadcast loops are fed real state.
+**Proof:** integration Phase F — two live nodes: f1 broadcasts a real SOS
+over its bridge, f2's bridge emits the structured `sos` frame (urgency,
+message — the exact data the app banner renders), and the auto-ack
+round-trips back to f1's bridge as a `delivery_ack`. **Proof gap:** app
+↔ daemon SOS on a device.
 
 ### 1.11 Routing research (decision layer) — 🟢 as research, 🟡 not yet live
 Destination-aware store-and-forward (`pkg/routing`), the DLF-standard DTN
@@ -184,6 +204,27 @@ gone, along with the `LOCAL_DEMO` flag and the stub `getPeers()`/
 lists. If the daemon is unreachable, the app shows a disconnected state —
 it never invents data. No fake mode ships.
 
+### 2.5b SOS banner fed by REAL events — 🟢 (logic), 🟡 (device)
+The banner previously had no data source: `handleIncomingSOS` was never
+called and the SOS FAB sent a *chat* message while claiming "SOS broadcast
+sent". Now: bridge `sos` frames route to a dedicated `onSOS` stream;
+`AppState` tracks real alerts (own sends arrive back as the daemon's echo
+with the real ID and expiry — nothing is invented locally); the FAB calls
+the real `sendSOS()` and reports honestly on failure. Incoming alerts show
+in the banner with urgency, expiry countdown, and ack count from live
+delivery acks.
+
+### 2.5c File transfer UI wired to the real protocol — 🟢 (logic), 🟡 (device)
+The app listened for `file_meta`/`file_progress`/`file_complete` frame
+types the bridge never emits, and `Message.fromJson` threw on `file`
+frames (missing `sender`/`payload`), silently dropping every incoming file
+event. Now: `FileTransfer.fromBridgeFrame` parses the bridge's actual
+`{type:file, status:...}` frames with sparse-field tolerance; AppState
+merges progress into the tracked transfer instead of replacing it, and
+creates a chat row for incoming files keyed by the canonical file ID.
+`sendFile` now includes the real `file_path` the daemon needs to read the
+file (daemon and app share the device filesystem).
+
 ### 2.6 Timestamps — 🟢
 Single wire convention: Unix **nanoseconds** everywhere, via
 `utils/time.dart` (`unixNanosNow`). Flutter unit tests assert conversion.
@@ -209,10 +250,43 @@ Every check must pass on `main`. There are no `|| true` escapes anywhere.
 | BLE / Wi-Fi Aware / LoRa transports | ⚫ | Deferred; LAN first |
 | Smart routing (spray-and-wait, PROPHET) | 🟢 | Live wire (Phase E, `-routing spray`) + simulator + benchmark; PROPHET handoff on the live wire needs predictability-vector exchange (next slice) |
 | ~~Identity seed-phrase backup~~ | 🟢 done | CLI + bridge + app dialog; phases C & D assert it end-to-end |
+| ~~File transfer~~ | 🟢 daemon | Real-node chunked round-trip + traversal rejection (`transfer_test.go`); app on device pending |
+| ~~SOS~~ | 🟢 daemon | Phase F: broadcast → structured frame → auto-ack round-trip; app on device pending |
 | Automatic re-send on delivery failure | ⚫ | Phase 3 store-and-forward, with benchmark |
-| End-to-end file transfer test | ⚫ | Requires devices |
+| App-side identity restore (paste phrase) | ⚫ | After device smoke test |
 | Play Store packaging/signing | ⚫ | Launch milestone |
 
 ---
 
-*Last updated: 2026-09-05. Update this file whenever a status changes.*
+*Last updated: 2026-09-05 (audit pass 2). Update this file whenever a status changes.*
+
+## 5. Audit pass 2 (2026-09-05) — bugs found and fixed
+
+An honest re-read of every subsystem found the following real defects — all
+fixed with tests or integration assertions pinning them:
+
+1. **SOS button was fake.** The FAB sent a *chat* message containing the
+   text "🚨 SOS!…" and showed "SOS broadcast sent"; `sendSOS()` had no UI
+   caller. Now it sends a real SOS frame and reports failure honestly.
+2. **Bridge rejected `sos` and `file` frames** ("unknown message type") —
+   the app could never send either. Both handlers implemented.
+3. **SOS manager was inert** — `SendAlert`/`HandleIncomingSOS`/
+   `HandleDeliveryAck` had zero callers. All wired through the bridge.
+4. **File event wire mismatch** — app listened for frame types the bridge
+   never emits; `Message.fromJson` threw on `file` frames (dropped
+   silently). App now parses the real frames (`fromBridgeFrame`).
+5. **File IDs were never correlated** — every file notification generated
+   a fresh random ID, so started/progress/complete frames (and the app's
+   message ID) named three different files. One canonical ID now flows
+   from the app's message ID through the whole transfer.
+6. **`sendIdentity` panicked** when the E2E manager was nil (main.go
+   explicitly allows that fallback). Nil-guarded.
+7. **Path traversal in file transfer** — a remote peer could craft a
+   filename to write outside the incoming dir. Rejected (test-pinned).
+8. **File double-close race** — `SendFile` closed the file while the
+   sending goroutine still read it, killing every transfer (test-pinned).
+9. **Store backup non-atomic + only on shutdown** — a crash lost
+   everything. Atomic temp+rename+fsync, plus a 30s autosave loop.
+10. **Collision-prone message IDs** — bare microsecond timestamps could
+    collide across devices, breaking dedup and receipt matching. Random
+    suffix added.
