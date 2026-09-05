@@ -4,6 +4,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../utils/time.dart';
 import '../models/message.dart';
@@ -152,44 +153,12 @@ class AppState extends ChangeNotifier {
     });
 
     daemon.onMessage.listen((msg) {
+      // Chat messages only — SOS alerts arrive on their own stream and
+      // files on theirs; neither belongs in the chat timeline.
+      if (msg.isSos || msg.isFile) return;
       // Deduplicate against already-loaded messages (e.g. from local storage)
       if (!_messages.any((m) => m.id == msg.id)) {
         _messages.insert(0, msg);
-
-        // Create a FileTransfer entry for incoming file messages
-        if (msg.isFile && msg.isIncoming) {
-          try {
-            final meta = jsonDecode(msg.payload);
-            final ft = FileTransfer(
-              fileId: msg.id,
-              fileName: meta['file_name'] as String? ?? 'Unknown file',
-              fileSize: meta['file_size'] as int? ?? 0,
-              mimeType: meta['mime_type'] as String? ?? 'application/octet-stream',
-              chunkCount: meta['chunk_count'] as int? ?? 1,
-              sender: msg.sender,
-              senderNick: msg.senderNick,
-              recipient: msg.recipient,
-              timestamp: msg.timestamp,
-              status: FileTransferStatus.receiving,
-              isIncoming: true,
-            );
-            _fileTransfers.insert(0, ft);
-          } catch (_) {
-            // If payload can't be parsed as JSON, create a minimal entry
-            _fileTransfers.insert(0, FileTransfer(
-              fileId: msg.id,
-              fileName: msg.payload,
-              fileSize: 0,
-              sender: msg.sender,
-              senderNick: msg.senderNick,
-              recipient: msg.recipient,
-              timestamp: msg.timestamp,
-              status: FileTransferStatus.receiving,
-              isIncoming: true,
-            ));
-          }
-        }
-
         _refreshConversations();
         notifyListeners();
         _schedulePersist();
@@ -197,14 +166,103 @@ class AppState extends ChangeNotifier {
     });
 
     daemon.onFileTransfer.listen((ft) {
-      // Update existing file transfer or add new one
       final idx = _fileTransfers.indexWhere((t) => t.fileId == ft.fileId);
       if (idx >= 0) {
-        _fileTransfers[idx] = ft;
+        // Merge — the bridge's frames are sparse (progress/complete carry
+        // only a few fields), so a blind replace would wipe the metadata
+        // the `started` frame populated.
+        final t = _fileTransfers[idx];
+        if (ft.fileName != 'Unknown file') t.fileName = ft.fileName;
+        if (ft.fileSize > 0) t.fileSize = ft.fileSize;
+        if (ft.sender.isNotEmpty) t.sender = ft.sender;
+        if (ft.senderNick.isNotEmpty) t.senderNick = ft.senderNick;
+        if (ft.recipient != null) t.recipient = ft.recipient;
+        if (ft.outputPath != null) t.outputPath = ft.outputPath;
+        if (ft.error != null) t.error = ft.error;
+        if (ft.progress > 0) t.progress = ft.progress.clamp(0.0, 1.0);
+        // Direction: an incoming `started` frame moves a new transfer to
+        // receiving; terminal states stick; never downgrade an active one.
+        if (ft.status == FileTransferStatus.complete ||
+            ft.status == FileTransferStatus.failed ||
+            ft.status == FileTransferStatus.cancelled) {
+          t.status = ft.status;
+        } else if (t.status == FileTransferStatus.pending) {
+          t.status = ft.isIncoming
+              ? FileTransferStatus.receiving
+              : FileTransferStatus.sending;
+        }
       } else {
-        _fileTransfers.insert(0, ft);
+        // A brand-new transfer: from the wire it can only be incoming.
+        final incoming = ft.sender.isNotEmpty && ft.sender != _localPeerId;
+        _fileTransfers.insert(0, FileTransfer(
+          fileId: ft.fileId,
+          fileName: ft.fileName,
+          fileSize: ft.fileSize,
+          mimeType: ft.mimeType,
+          chunkCount: ft.chunkCount,
+          sender: ft.sender,
+          senderNick: ft.senderNick,
+          recipient: ft.recipient,
+          timestamp: ft.timestamp,
+          status: incoming ? FileTransferStatus.receiving : ft.status,
+          progress: ft.progress,
+          outputPath: ft.outputPath,
+          error: ft.error,
+          isIncoming: incoming,
+        ));
+
+        // An incoming file also belongs in the chat timeline: the row's ID
+        // equals the transfer's fileId (the daemon's canonical ID), so the
+        // file bubble can look its progress up by message ID.
+        if (incoming && !_messages.any((m) => m.id == ft.fileId)) {
+          _messages.insert(0, Message(
+            id: ft.fileId,
+            type: 'file',
+            sender: ft.sender,
+            senderNick: ft.senderNick,
+            recipient: ft.recipient,
+            payload: jsonEncode({
+              'file_name': ft.fileName,
+              'file_size': ft.fileSize,
+              'mime_type': ft.mimeType,
+              'chunk_count': ft.chunkCount,
+            }),
+            timestamp: ft.timestamp,
+            isSent: false,
+          ));
+          _refreshConversations();
+        }
       }
       notifyListeners();
+    });
+
+    daemon.onSOS.listen((alert) {
+      final idx = _activeAlerts.indexWhere((a) => a.id == alert.id);
+      if (idx >= 0) {
+        // Already tracking (e.g. our own send echo) — nothing new to add.
+        return;
+      }
+      // The daemon relays our own broadcast back as an echo with sender ==
+      // us — that is how a sent alert lands in the banner. Anything from
+      // another peer is a real incoming alert.
+      final isOwn = alert.sender == _localPeerId && _localPeerId.isNotEmpty;
+      final tracked = SOSAlert(
+        id: alert.id,
+        sender: alert.sender,
+        senderNick: alert.senderNick,
+        message: alert.message,
+        urgency: alert.urgency,
+        latitude: alert.latitude,
+        longitude: alert.longitude,
+        accuracy: alert.accuracy,
+        receivedAt: alert.receivedAt,
+        expiresAt: alert.expiresAt,
+        ackRequired: alert.ackRequired,
+        isOwn: isOwn,
+      );
+      _activeAlerts.insert(0, tracked);
+      notifyListeners();
+      _schedulePersist();
     });
 
     daemon.onPeerJoined.listen((peer) {
@@ -234,9 +292,18 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Actions ──
+
+  /// Generates a message ID that cannot collide with another device's:
+  /// microsecond timestamp + random suffix (a bare timestamp is guessable
+  /// and collisions break dedup and receipt matching).
+  String _newId() {
+    final rnd = Random.secure().nextInt(0xFFFFFF).toRadixString(16);
+    return '${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}-$rnd';
+  }
+
   Future<bool> sendMessage(String text, {String? recipient}) async {
     final msg = Message(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      id: _newId(),
       type: 'chat',
       sender: _localPeerId,
       senderNick: _nickname,
@@ -277,7 +344,7 @@ class AppState extends ChangeNotifier {
     });
 
     final msg = Message(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      id: _newId(),
       type: 'sos',
       sender: _localPeerId,
       senderNick: _nickname,
@@ -291,50 +358,13 @@ class AppState extends ChangeNotifier {
 
     final ok = await daemon.sendMessage(msg);
     if (ok) {
-      _messages.insert(0, msg);
-
-      // Track locally as our own active alert
-      final alert = SOSAlert(
-        id: msg.id,
-        sender: _localPeerId,
-        senderNick: _nickname,
-        message: message,
-        urgency: urgency,
-        latitude: latitude,
-        longitude: longitude,
-        accuracy: 10.0,
-        receivedAt: DateTime.now(),
-        expiresAt: DateTime.now().add(const Duration(minutes: 10)),
-        ackRequired: true,
-        isOwn: true,
-      );
-      _activeAlerts.insert(0, alert);
-
-      await _refreshConversations();
+      // The daemon re-broadcasts our own alert back to us with the real
+      // (daemon-generated) message ID and 60-minute expiry — that echo is
+      // what the onSOS listener tracks. Nothing is invented here.
       notifyListeners();
       _persistMessages();
     }
     return ok;
-  }
-
-  /// Handles an incoming SOS message from the mesh.
-  Future<void> handleIncomingSOS(Map<String, dynamic> json) async {
-    final alert = SOSAlert.fromJson(json);
-
-    // Check if we already have this alert
-    if (!_activeAlerts.any((a) => a.id == alert.id)) {
-      _activeAlerts.insert(0, alert);
-    }
-
-    // Also add to messages for chat history
-    final msg = Message.fromJson(json);
-    if (!_messages.any((m) => m.id == msg.id)) {
-      _messages.insert(0, msg);
-    }
-
-    await _refreshConversations();
-    notifyListeners();
-    _schedulePersist();
   }
 
   /// Starts a file transfer to [recipient].
@@ -351,12 +381,15 @@ class AppState extends ChangeNotifier {
   }) async {
     if (!_connected) return null;
 
-    final id = DateTime.now().microsecondsSinceEpoch.toString();
+    final id = _newId();
     final payload = jsonEncode({
       'file_name': fileName,
       'file_size': fileSize,
       'mime_type': mimeType,
       'chunk_count': 1,
+      // The daemon and the app run on the same device; the daemon reads
+      // the file from this absolute path to stream it chunk by chunk.
+      'file_path': filePath,
     });
 
     final msg = Message(
@@ -396,15 +429,6 @@ class AppState extends ChangeNotifier {
     }
 
     return ft;
-  }
-
-  /// Updates the progress of an in-progress file transfer.
-  void updateFileTransferProgress(String fileId, double progress) {
-    final ft = fileTransferForId(fileId);
-    if (ft != null) {
-      ft.progress = progress.clamp(0.0, 1.0);
-      notifyListeners();
-    }
   }
 
   /// Looks up a [FileTransfer] by its [fileId].

@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../services/app_state.dart';
 import '../models/contact.dart';
+import '../models/sos_alert.dart';
 
 /// Chat list screen — shows all active conversations with unread badges,
 /// online indicators, and relative timestamps.
@@ -113,15 +114,23 @@ class _ChatListScreenState extends State<ChatListScreen> {
             style: FilledButton.styleFrom(
               backgroundColor: Colors.red,
             ),
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(ctx);
-              context.read<AppState>().sendMessage(
-                    '🚨 SOS! Emergency broadcast — I need help!',
+              final messenger = ScaffoldMessenger.of(context);
+              final ok = await context.read<AppState>().sendSOS(
+                    message: '🚨 SOS! Emergency broadcast — I need help!',
+                    urgency: SOSUrgency.high,
                   );
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('SOS broadcast sent to all reachable peers'),
-                ),
+              messenger.showSnackBar(
+                ok
+                    ? const SnackBar(
+                        content: Text(
+                            'SOS broadcast sent to all reachable peers'),
+                      )
+                    : const SnackBar(
+                        backgroundColor: Colors.red,
+                        content: Text('Failed to send SOS — check connection'),
+                      ),
               );
             },
             child: const Text('Send SOS'),

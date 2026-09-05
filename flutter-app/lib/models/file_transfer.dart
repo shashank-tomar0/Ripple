@@ -22,14 +22,14 @@ enum FileTransferStatus {
 /// Mirrors the Go daemon's file transfer model for seamless serialization.
 /// Each transfer has a unique [fileId] tied to the corresponding Message id.
 class FileTransfer {
-  final String fileId;
-  final String fileName;
-  final int fileSize;
-  final String mimeType;
-  final int chunkCount;
-  final String sender;
-  final String senderNick;
-  final String? recipient;
+  String fileId;
+  String fileName;
+  int fileSize;
+  String mimeType;
+  int chunkCount;
+  String sender;
+  String senderNick;
+  String? recipient;
   final int timestamp;
   FileTransferStatus status;
   double progress;
@@ -54,26 +54,49 @@ class FileTransfer {
     this.isIncoming = false,
   });
 
-  factory FileTransfer.fromJson(Map<String, dynamic> json) => FileTransfer(
-        fileId: json['file_id'] as String,
-        fileName: json['file_name'] as String,
-        fileSize: json['file_size'] as int,
-        mimeType: json['mime_type'] as String? ?? 'application/octet-stream',
-        chunkCount: json['chunk_count'] as int? ?? 1,
-        sender: json['sender'] as String,
-        senderNick: json['sender_nick'] as String? ?? '',
-        recipient: json['recipient'] as String?,
-        // Wire 'ts' is Unix nanoseconds (Go: Message.Timestamp = UnixNano).
-        timestamp: json['ts'] as int? ?? unixNanosNow(),
-        status: FileTransferStatus.values.firstWhere(
-          (e) => e.name == json['status'],
-          orElse: () => FileTransferStatus.pending,
-        ),
-        progress: (json['progress'] as num?)?.toDouble() ?? 0.0,
-        outputPath: json['output_path'] as String?,
-        error: json['error'] as String?,
-        isIncoming: json['is_incoming'] as bool? ?? false,
-      );
+  factory FileTransfer.fromJson(Map<String, dynamic> json) =>
+      FileTransfer.fromBridgeFrame(json);
+
+  /// Parses a file frame exactly as the daemon's bridge emits it.
+  ///
+  /// The bridge sends ONE `file` frame type whose `status` field is
+  /// started|progress|complete|failed, and the frames are deliberately
+  /// sparse: `started` carries full metadata, `progress` carries only
+  /// progress/chunk info, `complete` only the output path. Every field is
+  /// therefore optional (missing values fall back to inert defaults — the
+  /// AppState layer merges them into the tracked transfer).
+  factory FileTransfer.fromBridgeFrame(Map<String, dynamic> json) {
+    // The bridge uses `filename`; the older app-side payload used
+    // `file_name`. Accept both.
+    final name = (json['filename'] as String?) ??
+        (json['file_name'] as String?) ??
+        'Unknown file';
+    final status = switch (json['status']) {
+      'complete' => FileTransferStatus.complete,
+      'failed' => FileTransferStatus.failed,
+      'cancelled' => FileTransferStatus.cancelled,
+      // 'started' or 'progress': not terminal; AppState keeps the tracked
+      // transfer's direction (sending vs receiving).
+      _ => FileTransferStatus.pending,
+    };
+    return FileTransfer(
+      fileId: json['file_id'] as String,
+      fileName: name,
+      fileSize: json['file_size'] as int? ?? 0,
+      mimeType: json['mime_type'] as String? ?? 'application/octet-stream',
+      chunkCount: json['chunk_count'] as int? ?? 1,
+      sender: json['sender'] as String? ?? '',
+      senderNick: json['sender_nick'] as String? ?? '',
+      recipient: json['recipient'] as String?,
+      // Wire 'ts' is Unix nanoseconds (Go: Message.Timestamp = UnixNano).
+      timestamp: json['ts'] as int? ?? unixNanosNow(),
+      status: status,
+      progress: (json['progress'] as num?)?.toDouble() ?? 0.0,
+      outputPath: json['output_path'] as String?,
+      error: json['error'] as String?,
+      isIncoming: json['is_incoming'] as bool? ?? false,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'file_id': fileId,

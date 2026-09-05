@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/message.dart';
 import '../models/contact.dart';
 import '../models/file_transfer.dart';
+import '../models/sos_alert.dart';
 import '../models/delivery_receipt.dart';
 import '../models/relay_event.dart';
 
@@ -46,6 +47,7 @@ abstract class DaemonService {
 
   Stream<Message> get onMessage;
   Stream<FileTransfer> get onFileTransfer;
+  Stream<SOSAlert> get onSOS;
   Stream<Contact> get onPeerJoined;
   Stream<Contact> get onPeerLeft;
   Stream<bool> get onConnectionState;
@@ -74,6 +76,7 @@ class WebSocketDaemonService extends DaemonService {
 
   final _messageController = StreamController<Message>.broadcast();
   final _fileTransferController = StreamController<FileTransfer>.broadcast();
+  final _sosController = StreamController<SOSAlert>.broadcast();
   final _peerJoinController = StreamController<Contact>.broadcast();
   final _peerLeaveController = StreamController<Contact>.broadcast();
   final _connectionController = StreamController<bool>.broadcast();
@@ -154,15 +157,19 @@ class WebSocketDaemonService extends DaemonService {
         _pubKey = json['public_key'] as String? ?? '';
         break;
       case 'chat':
-      case 'file':
-      case 'sos':
         _messageController.add(Message.fromJson(json));
         break;
-      case 'file_meta':
-      case 'file_progress':
-      case 'file_complete':
-      case 'file_error':
-        _fileTransferController.add(FileTransfer.fromJson(json));
+      // The daemon's bridge emits ONE file frame type with a `status`
+      // field (started|progress|complete|failed) — there are no separate
+      // file_meta/file_progress frame types. Routing these to the file
+      // transfer stream keeps progress updates alive.
+      case 'file':
+        _fileTransferController.add(FileTransfer.fromBridgeFrame(json));
+        break;
+      // SOS alerts are structured frames (urgency, message, lat/lon,
+      // expiry) — they feed the alert banner, not the chat stream.
+      case 'sos':
+        _sosController.add(SOSAlert.fromJson(json));
         break;
       case 'peer_join':
         _peerJoinController.add(Contact.fromJson(json['peer'] as Map<String, dynamic>));
@@ -239,6 +246,9 @@ class WebSocketDaemonService extends DaemonService {
 
   @override
   Stream<FileTransfer> get onFileTransfer => _fileTransferController.stream;
+
+  @override
+  Stream<SOSAlert> get onSOS => _sosController.stream;
 
   @override
   Stream<Contact> get onPeerJoined => _peerJoinController.stream;
